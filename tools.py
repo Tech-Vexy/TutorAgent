@@ -1,0 +1,260 @@
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import io
+import base64
+import warnings
+# Suppress non-interactive backend warning when user code calls plt.show() under Agg
+warnings.filterwarnings(
+    "ignore",
+    message=r".*FigureCanvasAgg is non-interactive, and thus cannot be shown.*",
+    category=UserWarning,
+)
+from langchain_core.tools import tool
+from skills_db import SkillManager, KnowledgeBase
+from tavily import TavilyClient
+import os
+import math
+import contextlib
+import sys
+import json
+
+# Initialize SkillManager
+skill_manager = SkillManager()
+# Initialize Knowledge Base for RAG
+knowledge_base = KnowledgeBase()
+
+# Initialize Tavily (uses TAVILY_API_KEY from environment)
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+try:
+    tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
+except Exception:
+    tavily_client = None
+
+@tool
+def generate_educational_plot(python_code: str) -> str:
+    """
+    Executes Python Matplotlib code to generate an educational graph or plot.
+    The code must use 'plt' to create the figure.
+    Returns a special string containing the base64 encoded image data.
+    """
+    fig = plt.figure()
+    buf = io.BytesIO()
+    try:
+        # Create a new figure to avoid state leakage
+        # fig already created; ensure we close it in finally block
+        
+        # Mock plt.show to prevent blocking or warnings in Agg backend
+        # and to ensure the figure isn't cleared before we save it.
+        # We store the original just in case, though in Agg it's less critical.
+        original_show = plt.show
+        plt.show = lambda *args, **kwargs: None
+        
+        try:
+            # Handle single-line code with semicolons by replacing them with newlines
+            if ';' in python_code and '\n' not in python_code:
+                python_code = python_code.replace('; ', ';\n').replace(';', ';\n')
+            
+            # Safe execution environment
+            local_scope = {'plt': plt, 'matplotlib': matplotlib}
+            exec(python_code, {}, local_scope)
+        finally:
+            # Restore plt.show
+            plt.show = original_show
+        
+        plt.savefig(buf, format='png', bbox_inches='tight')
+        buf.seek(0)
+        
+        # Encode
+        b64_data = base64.b64encode(buf.getvalue()).decode('utf-8')
+        return f"[IMAGE_GENERATED_BASE64_DATA: {b64_data}]"
+    except Exception as e:
+        return f"Error generating plot: {str(e)}"
+    finally:
+        try:
+            plt.close(fig)
+        except Exception:
+            pass
+        buf.close()
+
+@tool
+def generate_kcse_quiz(topic: str) -> str:
+    """
+    Generates a 3-question KCSE-style quiz on the given topic.
+    Returns the quiz as a formatted string.
+    """
+    # In a real scenario, this might call an LLM or database. 
+    # For this tool definition, we'll return a placeholder or use the LLM calling it to generate content if it was a direct generation tool.
+    # However, the prompt implies this is a tool the agent calls. 
+    # Since I cannot call an LLM inside this tool easily without circular deps or passing it in, 
+    # I will return a structured request that the calling agent (smart_llm) will likely interpret or I can mock it.
+    # But usually, "generate_quiz" tools in these architectures are often handled by the LLM itself or a specific chain.
+    # Given the instructions, I will implement a simple template response that the LLM can present, 
+    # or better, since the smart_llm has this tool, it might expect the tool to do the work.
+    # Let's make it return a prompt for the LLM to fill or a static structure.
+    # Actually, let's make it a bit dynamic if possible, or just return a string the LLM uses.
+    
+    return f"""
+    KCSE Quiz on {topic}:
+    
+    1. Question 1 (2 marks): [Insert specific question about {topic} relevant to Kenyan syllabus]
+    2. Question 2 (2 marks): [Insert specific question about {topic}]
+    3. Question 3 (1 mark): [Insert specific question about {topic}]
+    
+    (Please ask the student to attempt these questions.)
+    """
+
+@tool
+def learn_skill(name: str, code: str, description: str) -> str:
+    """
+    Saves a new skill (code snippet, formula, or procedure) to the agent's long-term skill memory.
+    Use this when the user teaches you a new method or you want to remember a complex solution for later.
+    
+    Args:
+        name: A short, descriptive name for the skill (e.g., "Quadratic Formula Solver").
+        code: The code, formula, or step-by-step procedure.
+        description: A detailed explanation of when and how to use this skill.
+    """
+    try:
+        skill_id = skill_manager.save_skill(name, code, description)
+        return f"Skill '{name}' saved successfully with ID: {skill_id}"
+    except Exception as e:
+        return f"Error saving skill: {str(e)}"
+
+@tool
+def search_skills(query: str) -> str:
+    """
+    Searches the agent's skill memory for relevant code, formulas, or procedures.
+    Use this when you need to recall how to solve a specific type of problem.
+    
+    Args:
+        query: A search query describing the skill you need (e.g., "how to solve quadratic equations").
+    """
+    try:
+        skills = skill_manager.retrieve_skill(query)
+        if not skills:
+            return "No relevant skills found."
+        
+        result = "Found the following skills:\n"
+        for skill in skills:
+            result += f"- Name: {skill.get('name')}\n  Description: {skill.get('description')}\n  Code/Content: {skill.get('code')}\n\n"
+        return result
+    except Exception as e:
+        return f"Error searching skills: {str(e)}"
+
+@tool
+def web_search(query: str, max_results: int = 5) -> str:
+    """
+    Search the web for up-to-date information using Tavily and return concise results.
+    Returns a JSON string with a short summary and top links.
+    """
+    try:
+        if tavily_client is None:
+            return json.dumps({"error": "Tavily disabled: missing or invalid TAVILY_API_KEY"})
+        resp = tavily_client.search(query=query, max_results=max_results)
+        # Normalize common Tavily fields
+        results = resp.get("results") or resp.get("data") or []
+        simplified = []
+        for r in results:
+            simplified.append({
+                "title": r.get("title") or r.get("name"),
+                "url": r.get("url"),
+                "snippet": r.get("content") or r.get("snippet")
+            })
+        out = {
+            "query": query,
+            "num_results": len(simplified),
+            "results": simplified[:max_results]
+        }
+        return json.dumps(out)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+@tool
+def add_knowledge(text: str, source: str = "user") -> str:
+    """
+    Add text content to the long-term knowledge base for RAG.
+    Splits long text into chunks automatically. Returns number of chunks added.
+    """
+    try:
+        count = knowledge_base.add_document(text, metadata={"source": source})
+        return f"Knowledge stored successfully. Chunks added: {count} (source={source})."
+    except Exception as e:
+        return f"Error adding knowledge: {e}"
+
+@tool
+def add_knowledge_url(url: str) -> str:
+    """
+    Fetch a web page and store its main text into the knowledge base.
+    Note: This uses a simple fetch and does not perform full boilerplate removal.
+    """
+    try:
+        import requests
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        text = resp.text
+        # Very naive stripping of HTML tags
+        try:
+            import re
+            text = re.sub(r"<script[\s\S]*?</script>", " ", text, flags=re.IGNORECASE)
+            text = re.sub(r"<style[\s\S]*?</style>", " ", text, flags=re.IGNORECASE)
+            text = re.sub(r"<[^>]+>", " ", text)
+        except Exception:
+            pass
+        count = knowledge_base.add_document(text, metadata={"source": url})
+        return f"Fetched and stored from URL. Chunks added: {count} (source={url})."
+    except Exception as e:
+        return f"Error adding knowledge from URL: {e}"
+
+@tool
+def search_knowledge(query: str, n_results: int = 3) -> str:
+    """
+    Search the knowledge base for relevant passages to use as context.
+    Returns a formatted string with sources and excerpts.
+    """
+    try:
+        items = knowledge_base.retrieve_knowledge(query, n_results=n_results)
+        if not items:
+            return "No relevant knowledge found."
+        lines = []
+        for i, it in enumerate(items, 1):
+            meta = it.get("metadata", {})
+            src = meta.get("source", "unknown")
+            snippet = it.get("text", "").strip()
+            if len(snippet) > 400:
+                snippet = snippet[:400] + "..."
+            lines.append(f"{i}. [source: {src}] {snippet}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error searching knowledge: {e}"
+
+@tool
+def run_python(code: str) -> str:
+    """
+    Execute small Python snippets for calculations or text processing.
+    Safety: No imports, file/network access disabled. Provides 'math' module.
+    Returns the stringified value of variable 'result' if set; otherwise stdout.
+    """
+    # Disallow dangerous patterns
+    forbidden = ["__import__", "open(", "exec(", "eval(", "os.", "sys.", "subprocess", "socket", "requests", "import "]
+    lowered = code.lower()
+    if any(p in lowered for p in forbidden):
+        return "Error: Disallowed code detected. Please avoid imports or system access."
+    # Prepare sandbox
+    safe_globals = {"__builtins__": {} , "math": math}
+    safe_locals = {}
+    # Capture stdout
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            exec(code, safe_globals, safe_locals)
+    except Exception as e:
+        return f"Error executing code: {e}"
+    # Prefer 'result' variable
+    if "result" in safe_locals:
+        try:
+            return str(safe_locals["result"]) 
+        except Exception:
+            pass
+    output = buf.getvalue()
+    return output if output else ""

@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  backend:
+    build: .
+    container_name: tutor_backend
+    env_file:
+      - .env
+    environment:
+      # DATABASE_URL and DB_URI should be provided in .env for Neon integration
+      # We allow passing these specific keys from shell/env if needed, but rely on .env file primarily
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
+      - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY}
+      - LANGCHAIN_TRACING_V2=${LANGCHAIN_TRACING_V2:-true}
+      - LANGCHAIN_PROJECT=${LANGCHAIN_PROJECT:-TopScore-AI}
+    volumes:
+      - ./chroma_db:/app/chroma_db
+    ports:
+      - "8080:8000"
+
+#   frontend:
+#     image: nginx:alpine
+#     container_name: tutor_frontend
+#     depends_on:
+#       - backend
+#     volumes:
+#       - ./flutter_client/build/web:/usr/share/nginx/html
+#       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf
+#     ports:
+#       - "80:80"
