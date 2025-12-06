@@ -111,7 +111,7 @@ CACHE_ENABLED = os.getenv("CACHE_ENABLED", "1") == "1"
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "3600"))  # 1 hour default
 CACHE_MAX_ENTRIES = int(os.getenv("CACHE_MAX_ENTRIES", "256"))
 # Groq Compound Systems toggle
-USE_GROQ_SYSTEM = os.getenv("USE_GROQ_SYSTEM", "1") == "1"
+USE_GROQ_SYSTEM = os.getenv("USE_GROQ_SYSTEM", "0") == "1"
 GROQ_SYSTEM_ID = os.getenv("GROQ_SYSTEM_ID")
 # Graph recursion handling controls
 MAX_GRAPH_RETRIES = int(os.getenv("MAX_GRAPH_RETRIES", "1"))
