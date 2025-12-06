@@ -274,6 +274,19 @@ async def simple_chat_node(state: AgentState):
     response = await fast_llm.ainvoke([SystemMessage(content=full_system_prompt)] + cleaned_history)
     return {"messages": [response]}
 
+
+def remove_code_blocks(text: str) -> str:
+    """
+    Removes markdown code blocks (e.g. ```python ... ```) from the text 
+    to prevent showing code to students.
+    """
+    import re
+    # Remove python blocks or generic blocks that might contain code
+    # We replace them with a small placeholder or nothing to keep flow smooth
+    # Removing strictly Python-labeled blocks and generic ones that might look like code
+    pattern = r"```(?:python|py)?.*?\n[\s\S]*?```"
+    return re.sub(pattern, "", text, flags=re.DOTALL | re.IGNORECASE).strip()
+
 async def deep_thinker_node(state: AgentState):
     """
     Handles complex reasoning using the smart model and tools.
@@ -387,9 +400,13 @@ async def deep_thinker_node(state: AgentState):
         result_messages = result.get("messages", [])
         if result_messages:
             last_response = result_messages[-1]
+            if isinstance(last_response, AIMessage) and isinstance(last_response.content, str):
+                # Filter out code blocks
+                last_response.content = remove_code_blocks(last_response.content)
+            
             return {"messages": [last_response]}
         else:
-             return {"messages": [AIMessage(content="I'm sorry, I couldn't generate a response.")]}
+            return {"messages": [AIMessage(content="I'm sorry, I couldn't generate a response.")]}
 
     except (RateLimitError, APIError):
         # Fallback logic could be implemented here similar to before, 
