@@ -14,7 +14,7 @@ import time
 import random
 from groq import RateLimitError, APIError
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage, ToolMessage
-from langchain_groq import ChatGroq
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
 from deepagents import create_deep_agent
@@ -28,83 +28,39 @@ from prompts import (
     PEDAGOGY_SOCRATIC,
     PEDAGOGY_DIRECT,
     PLANNING_PROMPT,
-    SKILL_SAVE_PROMPT
+    SKILL_SAVE_PROMPT,
+    REVIEWER_PROMPT
 )
 
 # --- Configuration ---
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-# Allow overriding the smart model via environment to avoid decommissioned defaults
-SMART_MODEL = os.getenv("SMART_MODEL", "llama-3.3-70b-versatile")
-# Allow overriding the fast model as well
-FAST_MODEL = os.getenv("FAST_MODEL", "llama-3.1-8b-instant")
-# Control fast model token cap for quicker responses
-FAST_TOKENS = int(os.getenv("FAST_TOKENS", "512"))
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+# Allow overriding the smart model via environment
+SMART_MODEL = os.getenv("SMART_MODEL", "gemini-1.5-pro")
+# Allow overriding the fast model
+FAST_MODEL = os.getenv("FAST_MODEL", "gemini-1.5-flash")
 
 # --- Models ---
-# Fast model for routing and simple chats
-fast_llm = ChatGroq(
+# Fast model for routing and simple chats (Gemini 1.5 Flash)
+fast_llm = ChatGoogleGenerativeAI(
     model=FAST_MODEL,
-    api_key=GROQ_API_KEY,
+    google_api_key=GOOGLE_API_KEY,
     temperature=0,
     max_retries=2,
-    max_tokens=FAST_TOKENS
+    convert_system_message_to_human=True # Gemini sometimes prefers this
 )
 
-# Smart model for deep reasoning and tools (use a different model to avoid 8B rate limits)
-smart_llm = ChatGroq(
+# Smart model for deep reasoning and tools (Gemini 1.5 Pro)
+smart_llm = ChatGoogleGenerativeAI(
     model=SMART_MODEL,
-    api_key=GROQ_API_KEY,
+    google_api_key=GOOGLE_API_KEY,
     temperature=0.5,
     max_retries=3
 )
 
-# Mixtral model (sparse MoE)
-mixtral_llm = ChatGroq(
-    model="mixtral-8x7b-32768",
-    api_key=GROQ_API_KEY,
-    temperature=0.5
-)
-
-# Gemma model
-gemma_llm = ChatGroq(
-    model="gemma-2-9b-it",
-    api_key=GROQ_API_KEY,
-    temperature=0.5
-)
-
-# Llama 3.2 1B Instruct
-llama32_1b_llm = ChatGroq(
-    model="llama-3.2-1b-instruct",
-    api_key=GROQ_API_KEY,
-    temperature=0.5
-)
-
-# Llama 3.2 3B Instruct
-llama32_3b_llm = ChatGroq(
-    model="llama-3.2-3b-instruct",
-    api_key=GROQ_API_KEY,
-    temperature=0.5
-)
-
-# Llama 3.1 70B versatile
-llama3_70b_llm = ChatGroq(
-    model=SMART_MODEL,
-    api_key=GROQ_API_KEY,
-    temperature=0.3,
-    max_retries=3
-)
-
-# Llama 3.1 8B instant
-llama3_8b_llm = ChatGroq(
-    model="llama-3.1-8b-instant",
-    api_key=GROQ_API_KEY,
-    temperature=0.5
-)
-
-# Vision model (Llama 3.2 11B Vision Instruct)
-vision_llm = ChatGroq(
-    model="llama-3.2-11b-vision-instruct",
-    api_key=GROQ_API_KEY,
+# Vision model (Gemini 1.5 Pro/Flash are natively multimodal)
+vision_llm = ChatGoogleGenerativeAI(
+    model="gemini-1.5-flash", # Flash is excellent for vision and fast
+    google_api_key=GOOGLE_API_KEY,
     temperature=0.2
 )
 
@@ -127,6 +83,7 @@ class AgentState(TypedDict):
     model_preference: Optional[str] # "fast", "smart", "vision"
     tool_invocations: Annotated[int, operator.add]
     plan: Optional[str]
+    review_count: int
 
 # --- Router Schema ---
 class RouterOutput(BaseModel):
@@ -142,6 +99,10 @@ class SkillSaveOutput(BaseModel):
     name: Optional[str] = Field(None, description="Short descriptive name of the skill.")
     description: Optional[str] = Field(None, description="Detailed description of when and how to apply this skill.")
     code: Optional[str] = Field(None, description="Optional Python code snippet demonstrating the skill.")
+
+class ReviewOutput(BaseModel):
+    approved: bool = Field(..., description="Whether the response is approved.")
+    feedback: str = Field(..., description="Feedback if rejected, or empty if approved.")
 
 def clean_messages(messages: List[BaseMessage]) -> List[BaseMessage]:
     """
@@ -332,20 +293,9 @@ async def deep_thinker_node(state: AgentState):
             knowledge_context = ""
 
     # Select model based on preference
+    # Defaulting to Gemini 1.5 Pro for smart and Flash for everything else
     if model_pref == "fast":
         selected_llm = fast_llm
-    elif model_pref in ("mixtral", "mixtral-8x7b-32768", "openai/gpt-oss"):
-        selected_llm = mixtral_llm
-    elif model_pref == "gemma":
-        selected_llm = gemma_llm
-    elif model_pref == "llama32_1b":
-        selected_llm = llama32_1b_llm
-    elif model_pref == "llama32_3b":
-        selected_llm = llama32_3b_llm
-    elif model_pref == "llama3_70b":
-        selected_llm = llama3_70b_llm
-    elif model_pref == "llama3_8b":
-        selected_llm = llama3_8b_llm
     else:
         selected_llm = smart_llm
     
@@ -526,6 +476,43 @@ async def reflection_node(state: AgentState):
         
     return state # Pass through
 
+async def reviewer_node(state: AgentState):
+    """
+    Reviewer Node:
+    Critiques the Deep Thinker's response.
+    """
+    messages = state["messages"]
+    last_message = messages[-1]
+    
+    # If last message is not AI, something is wrong, just approve to avoid getting stuck
+    if not isinstance(last_message, AIMessage):
+        return {"review_count": 0} # No op
+        
+    structured_llm = fast_llm.with_structured_output(ReviewOutput)
+    
+    # We send the last few messages for context, plus the candidate response
+    cleaned_history = clean_messages(messages[-3:])
+    
+    try:
+        review = await structured_llm.ainvoke([SystemMessage(content=REVIEWER_PROMPT)] + cleaned_history)
+        
+        current_count = state.get("review_count", 0)
+        
+        if review.approved or current_count >= 2:
+            # Approved or max retries hit
+            return {"review_count": 0} # Reset? Or just pass.
+        else:
+            # Rejected
+            # We add a HumanMessage with feedback to guide the agent
+            feedback_msg = HumanMessage(content=f"REVIEWER FEEDBACK (Internal): {review.feedback}\nPlease rewrite your response to address this.")
+            return {
+                "messages": [feedback_msg],
+                "review_count": current_count + 1
+            }
+    except Exception:
+        # If review fails, pass through
+        return {"review_count": 0}
+
 # --- Graph Construction ---
 
 workflow = StateGraph(AgentState)
@@ -538,6 +525,7 @@ workflow.add_node("tools", tool_node)
 workflow.add_node("save_memory", save_memory_node)
 workflow.add_node("planner", planner_node)
 workflow.add_node("reflection", reflection_node)
+workflow.add_node("reviewer", reviewer_node)
 
 workflow.set_entry_point("router")
 
@@ -581,6 +569,23 @@ workflow.add_conditional_edges(
     should_continue,
     {
         "tools": "tools",
+        "reflection": "reviewer"
+    }
+)
+
+def review_decision(state: AgentState):
+    # If the last message is Human (feedback), loop back to deep_thinker
+    # If it's AI (original response unchanged) or review_count reset, proceed
+    messages = state["messages"]
+    if messages and isinstance(messages[-1], HumanMessage) and "REVIEWER FEEDBACK" in str(messages[-1].content):
+        return "deep_thinker"
+    return "reflection"
+
+workflow.add_conditional_edges(
+    "reviewer",
+    review_decision,
+    {
+        "deep_thinker": "deep_thinker",
         "reflection": "reflection"
     }
 )

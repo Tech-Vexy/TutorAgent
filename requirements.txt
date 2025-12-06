@@ -25,3 +25,4 @@ python-dotenv
 groq
 langsmith
 deepagents
+langchain-google-genai
