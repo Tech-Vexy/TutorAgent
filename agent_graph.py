@@ -439,12 +439,37 @@ async def deep_thinker_node(state: AgentState):
         from mcp_tool_adapter import get_mcp_tools
         mcp_tools = await get_mcp_tools()
         if mcp_tools:
-            # Avoid duplicate tool names if possible, or let LLM decide
-            # MCP tools might be named 'tavily_web_search' vs existing 'web_search'
             tools.extend(mcp_tools)
     except Exception as e:
-        # Log error but don't crash if MCP fails (e.g. if subprocess fails)
-        pass # In production, use a logger
+        pass
+
+    # --- Integration: Groq Server-Side Connectors (Google Drive) ---
+    # These are executed by Groq, not locally. We must bind them to the model
+    # but NOT include them in the local tool execution set (unless we had a local proxy).
+    try:
+        from groq_connectors import get_groq_drive_tool
+        groq_drive_tool = get_groq_drive_tool() # Returns dict or None
+        
+        # We need to bind tools to the model. 
+        # create_react_agent usually binds 'tools' to 'model'. 
+        # We want to add the Groq Connector tools to the binding, but strictly keep 'tools' list for local execution.
+        
+        # 1. Bind local tools
+        # selected_llm = selected_llm.bind_tools(tools)
+        # 2. If we have Groq tools, we need to mix them in.
+        # ChatGroq.bind_tools accepts dicts.
+        
+        all_bindable_tools = list(tools)
+        if groq_drive_tool:
+            all_bindable_tools.append(groq_drive_tool)
+            
+        # Bind ALL tools (Local + Groq) to the model
+        selected_llm_with_tools = selected_llm.bind_tools(all_bindable_tools)
+        
+    except Exception as e:
+        print(f"Error binding Groq Connectors: {e}")
+        selected_llm_with_tools = selected_llm # Fallback
+        
     
     # Dynamic System Prompt based on Strategy
     base_prompt = DEEP_THINKER_BASE_PROMPT.format(memory_context=memory_context, knowledge_context=knowledge_context)
@@ -473,9 +498,13 @@ async def deep_thinker_node(state: AgentState):
     full_system_prompt = f"{base_prompt}\n\n{pedagogy_instruction}"
     
     # Create Deep Agent
-    # We use create_react_agent for optimized tool calling (parallel execution support)
+    # We pass the ALREADY BOUND model. 
+    # We pass 'tools' (local only) so create_react_agent knows what legal tools are for the ToolNode it creates.
+    # Note: create_react_agent might try to bind 'tools' to the model again. 
+    # If using 'langgraph.prebuilt', passing a bound model usually respects the existing binding OR merges.
+    # To be safe, we rely on the fact that we passed the bound model.
     deep_agent = create_react_agent(
-        model=selected_llm,
+        model=selected_llm_with_tools,
         tools=tools,
         state_modifier=full_system_prompt
     )

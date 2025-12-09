@@ -904,14 +904,27 @@ async def get_user_threads(user_id: str):
     
     Returns a list of threads with their IDs, titles, and last update times.
     """
-    pool = app.state.pool
-    async with pool.connection() as conn:
-        cursor = await conn.execute(
-            "SELECT thread_id, title, updated_at FROM user_threads WHERE user_id = %s ORDER BY updated_at DESC",
-            (user_id,)
-        )
-        rows = await cursor.fetchall()
-        return [{"thread_id": r[0], "title": r[1], "updated_at": r[2]} for r in rows]
+    try:
+        pool = app.state.pool
+        async with pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT thread_id, title, updated_at FROM user_threads WHERE user_id = %s ORDER BY updated_at DESC",
+                (user_id,)
+            )
+            rows = await cursor.fetchall()
+            
+            threads = []
+            for r in rows:
+                threads.append({
+                    "thread_id": r[0],
+                    "title": r[1] or "New Conversation",
+                    "updated_at": r[2].isoformat() if r[2] else None
+                })
+            return threads
+    except Exception as e:
+        logger.error(f"Error fetching threads for {user_id}: {e}")
+        # Return empty list instead of 500 to keep frontend alive
+        return []
 
 @app.get("/threads/{thread_id}/messages", tags=["Threads"], summary="Get messages in a thread")
 async def get_thread_messages(thread_id: str):
@@ -1250,7 +1263,7 @@ if __name__ == "__main__":
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-    config = uvicorn.Config(app, host="0.0.0.0", port=8080)
+    config = uvicorn.Config(app, host="0.0.0.0", port=8081)
     
     # Monkeypatch config.setup_event_loop (not server.setup_event_loop)
     original_setup = config.setup_event_loop

@@ -71,8 +71,7 @@ class ModelManager:
                 model_name=self.fast_model_id,
                 groq_api_key=self.groq_api_key,
                 temperature=0,
-                max_retries=2,
-                reasoning_effort="low"
+                max_retries=2
             )
             
             self.smart_llm = ChatGroq(
