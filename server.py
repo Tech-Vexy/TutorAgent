@@ -137,7 +137,7 @@ def _make_cache_key(message_text: str, image_data: Optional[str]) -> str:
 # --- Configuration ---
 DB_URI = os.getenv("DB_URI")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-ENABLE_TTS = os.getenv("ENABLE_TTS", "0")  # Set to "1" to enable TTS if supported
+ENABLE_TTS = os.getenv("ENABLE_TTS", "1")  # Set to "1" to enable TTS if supported
 GRAPH_RECURSION_LIMIT = int(os.getenv("GRAPH_RECURSION_LIMIT", "100"))
 # Response Cache configuration (in-memory LRU)
 CACHE_ENABLED = os.getenv("CACHE_ENABLED", "1") == "1"
@@ -776,11 +776,13 @@ async def websocket_endpoint(websocket: WebSocket):
             if full_response_text and ENABLE_TTS == "1" and groq_client is not None:
                 try:
                     logger.info("Generating TTS audio...")
-                    if len(full_response_text) < 1000 and hasattr(groq_client, "audio") and hasattr(groq_client.audio, "speech"):
+                    # Limit text length to avoid timeouts/limits
+                    tts_text = full_response_text[:4000] 
+                    if hasattr(groq_client, "audio") and hasattr(groq_client.audio, "speech"):
                         response = groq_client.audio.speech.create(
                             model="playai-tts",
-                            voice="Angelo-PlayAI",
-                            input=full_response_text
+                            voice="Fritz-PlayAI",
+                            input=tts_text
                         )
                         # Extract bytes
                         if hasattr(response, "content"):
@@ -789,6 +791,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             audio_bytes = response.read()
                         else:
                             audio_bytes = bytes(response)
+                        
                         audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
                         await websocket.send_json({"type": "audio_response", "content": f"data:audio/mp3;base64,{audio_b64}"})
                 except Exception as e:

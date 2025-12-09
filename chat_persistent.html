@@ -178,6 +178,9 @@
         <button onclick="document.getElementById('cameraInput').click()" class="icon-btn" title="Open Camera/Gallery">
             📷
         </button>
+        <button id="micBtn" onclick="toggleRecording()" class="icon-btn" title="Start Recording">
+            🎤
+        </button>
 
         <input type="text" id="messageInput" placeholder="Type a message..." onkeypress="handleKeyPress(event)">
         <button onclick="sendMessage()">Send</button>
@@ -242,6 +245,11 @@
                 finishMessage();
             } else if (data.type === "error") {
                 appendMessage("ai", "Error: " + data.content);
+            } else if (data.type === "audio_response") {
+                playAudio(data.content);
+            } else if (data.type === "transcription") {
+                document.getElementById('messageInput').value += " " + data.content;
+                appendMessage("system", "🗣️ Recognized: " + data.content);
             }
         };
 
@@ -249,6 +257,96 @@
             console.log("Disconnected");
             appendMessage("system", "Disconnected from server. Please refresh.");
         };
+
+        // Audio Recording (STT)
+        let mediaRecorder;
+        let audioChunks = [];
+        let isRecording = false;
+
+        async function toggleRecording() {
+            const btn = document.getElementById('micBtn');
+
+            if (!isRecording) {
+                // Start Recording
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    mediaRecorder = new MediaRecorder(stream);
+                    audioChunks = [];
+
+                    mediaRecorder.ondataavailable = event => {
+                        audioChunks.push(event.data);
+                    };
+
+                    mediaRecorder.onstop = async () => {
+                        const audioBlob = new Blob(audioChunks, { type: 'audio/wav' }); // Groq supports various formats, container might be webm/ogg depending on browser
+                        const reader = new FileReader();
+                        reader.readAsDataURL(audioBlob);
+                        reader.onloadend = () => {
+                            const base64Audio = reader.result;
+                            // Send to backend
+                            ws.send(JSON.stringify({
+                                user_id: USER_ID,
+                                thread_id: THREAD_ID,
+                                audio_data: base64Audio,
+                                model_preference: "fast" // STT is fast
+                            }));
+                            appendMessage("system", "🎤 Sending audio for transcription...");
+                        };
+
+                        // Stop tracks
+                        stream.getTracks().forEach(track => track.stop());
+                    };
+
+                    mediaRecorder.start();
+                    isRecording = true;
+                    btn.innerHTML = "🛑";
+                    btn.style.background = "#ef4444";
+                    document.getElementById('messageInput').placeholder = "Listening...";
+                } catch (err) {
+                    console.error("Microphone access error:", err);
+                    alert("Could not access microphone.");
+                }
+            } else {
+                // Stop Recording
+                mediaRecorder.stop();
+                isRecording = false;
+                btn.innerHTML = "🎤";
+                btn.style.background = ""; // Reset to default (CSS class handles it or inherit)
+                // Actually reset to var(--primary) or just remove inline style to revert to CSS
+                btn.style.removeProperty('background');
+                document.getElementById('messageInput').placeholder = "Type a message...";
+            }
+        }
+
+        // Audio Handling
+        function playAudio(base64Audio) {
+            if (!currentAiMessageDiv) return;
+
+            const audioContainer = document.createElement('div');
+            audioContainer.style.marginTop = "10px";
+            audioContainer.style.display = "flex";
+            audioContainer.style.alignItems = "center";
+            audioContainer.style.gap = "8px";
+
+            const label = document.createElement('span');
+            label.innerText = "🔊 Listen:";
+            label.style.fontSize = "0.8rem";
+            label.style.fontWeight = "bold";
+            label.style.color = "#4b5563";
+
+            const audio = document.createElement('audio');
+            audio.controls = true;
+            audio.src = base64Audio;
+            audio.style.height = "30px";
+            audio.style.maxWidth = "100%";
+
+            audioContainer.appendChild(label);
+            audioContainer.appendChild(audio);
+            currentAiMessageDiv.appendChild(audioContainer);
+
+            // Auto-play attempt
+            audio.play().catch(e => console.log("Auto-play blocked:", e));
+        }
 
         // Image Handling
         function handleImageUpload() {
