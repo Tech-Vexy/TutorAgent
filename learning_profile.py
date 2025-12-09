@@ -39,6 +39,7 @@ class LearningProfile:
             "topics": {},  # topic -> {correct, incorrect, last_seen}
             "preferred_style": "balanced",  # visual, textual, interactive
             "difficulty_level": "medium",  # easy, medium, hard
+            "preferred_language": "auto",  # auto, en (English), sw (Kiswahili)
             "strengths": [],
             "weaknesses": [],
             "total_sessions": 0,
@@ -106,7 +107,7 @@ class LearningProfile:
     
     def set_preference(self, key: str, value: str):
         """Update user preference."""
-        if key in ["preferred_style", "difficulty_level"]:
+        if key in ["preferred_style", "difficulty_level", "preferred_language"]:
             self.data[key] = value
             self.save()
     

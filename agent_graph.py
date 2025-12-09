@@ -58,6 +58,8 @@ skill_manager = SkillManager()
 from conversation_summarizer import conversation_summarizer
 # Initialize Learning Profile for adaptive tutoring
 from learning_profile import get_learning_profile
+# Initialize Language Support for multilingual responses
+from language_support import detect_language, get_language_instruction, get_localized_prompt, LanguageCode
 
 # --- State Definition ---
 MAX_TOOL_CALLS = int(os.getenv("MAX_TOOL_CALLS", "4"))
@@ -72,6 +74,7 @@ class AgentState(TypedDict):
     tool_invocations: Annotated[int, operator.add]
     plan: Optional[str]
     review_count: int
+    response_language: str  # "sw" for Kiswahili, "en" for English
 
 # --- Router Schema ---
 class RouterOutput(BaseModel):
@@ -174,9 +177,43 @@ async def router_node(state: AgentState):
     - VISION_ANALYSIS: If the user provides an image.
     - COMPLEX_REASONING: For math, science, or deep questions requiring tools.
     - SIMPLE_CHAT: For greetings, quick facts, or clarifications.
+    
+    Also detects language - uses Kiswahili for Swahili subject, English otherwise.
+    Respects user's preferred_language setting if set.
     """
     messages = state["messages"]
     last_message = messages[-1]
+    user_profile = state.get("user_profile", {})
+    student_id = user_profile.get("student_id", "default_user")
+    
+    # Extract text for language detection
+    query_text = extract_text_content(last_message) if isinstance(last_message, HumanMessage) else ""
+    
+    # Check user's profile for language preference first
+    detected_lang = "en"  # Default
+    lang_reason = "Default English"
+    
+    try:
+        learner_profile = get_learning_profile(student_id)
+        user_lang_pref = learner_profile.data.get("preferred_language", "auto")
+        
+        if user_lang_pref == "sw":
+            # User explicitly wants Kiswahili
+            detected_lang = "sw"
+            lang_reason = "User preference set to Kiswahili"
+        elif user_lang_pref == "en":
+            # User explicitly wants English
+            detected_lang = "en"
+            lang_reason = "User preference set to English"
+        else:
+            # Auto-detect based on content
+            detected_lang, lang_reason = detect_language(query_text)
+    except Exception:
+        # Fall back to auto-detection if profile access fails
+        detected_lang, lang_reason = detect_language(query_text)
+    
+    if detected_lang == "sw":
+        print(f"\n🌍 Language Detection: KISWAHILI - {lang_reason}\n")
     
     # Check for image presence manually to force vision intent if needed
     has_image = False
@@ -188,7 +225,11 @@ async def router_node(state: AgentState):
                     break
     
     if has_image:
-        return {"intent": "VISION_ANALYSIS", "pedagogy_strategy": "SOCRATIC_GUIDE"}
+        return {
+            "intent": "VISION_ANALYSIS", 
+            "pedagogy_strategy": "SOCRATIC_GUIDE",
+            "response_language": detected_lang
+        }
 
     # Use structured output for text classification
     structured_llm = model_manager.get_model("fast").with_structured_output(RouterOutput)
@@ -203,7 +244,8 @@ async def router_node(state: AgentState):
     
     updates = {
         "intent": response.intent,
-        "pedagogy_strategy": response.pedagogy_strategy
+        "pedagogy_strategy": response.pedagogy_strategy,
+        "response_language": detected_lang
     }
     
     # Smart Model Switching:
@@ -217,12 +259,15 @@ async def router_node(state: AgentState):
 async def vision_node(state: AgentState):
     """
     Uses Llama 3.2 Vision to analyze images.
+    Applies language context if analyzing Swahili subject content.
     """
     messages = state["messages"]
+    response_language = state.get("response_language", "en")
     # The vision model needs the image message. 
     # We assume the last message contains the image in the correct format.
     
-    system_prompt = VISION_SYSTEM_PROMPT
+    # Apply language instruction to vision prompt
+    system_prompt = get_localized_prompt(VISION_SYSTEM_PROMPT, response_language)
     
     try:
         response = await model_manager.get_model("vision").ainvoke([SystemMessage(content=system_prompt)] + [messages[-1]])
@@ -240,11 +285,15 @@ async def vision_node(state: AgentState):
 async def simple_chat_node(state: AgentState):
     """
     Handles simple interactions using the fast model.
+    Responds in Kiswahili if the subject is Swahili, English otherwise.
     """
     messages = state["messages"]
     user_profile = state.get("user_profile", {})
     student_id = user_profile.get("student_id", "default_user")
-    system_prompt = SIMPLE_CHAT_SYSTEM_PROMPT
+    response_language = state.get("response_language", "en")
+    
+    # Apply language-specific prompt
+    system_prompt = get_localized_prompt(SIMPLE_CHAT_SYSTEM_PROMPT, response_language)
 
     # Retrieve a small amount of relevant memory to personalize the reply
     memory_context = ""
@@ -283,6 +332,7 @@ def remove_code_blocks(text: str) -> str:
 async def deep_thinker_node(state: AgentState):
     """
     Handles complex reasoning using the smart model and tools.
+    Responds in Kiswahili if the subject is Swahili, English otherwise.
     """
     messages = state["messages"]
     strategy = state.get("pedagogy_strategy", "DIRECT_ANSWER")
@@ -290,6 +340,7 @@ async def deep_thinker_node(state: AgentState):
     user_profile = state.get("user_profile", {})
     student_id = user_profile.get("student_id", "default_user")
     plan = state.get("plan")
+    response_language = state.get("response_language", "en")
     
     # Retrieve Episodic Memory
     last_message = messages[-1]
@@ -364,6 +415,10 @@ async def deep_thinker_node(state: AgentState):
     
     # Dynamic System Prompt based on Strategy
     base_prompt = DEEP_THINKER_BASE_PROMPT.format(memory_context=memory_context, knowledge_context=knowledge_context)
+    
+    # Add Language Instruction (Kiswahili for Swahili subject, English otherwise)
+    language_instruction = get_language_instruction(response_language)
+    base_prompt += f"\n{language_instruction}"
     
     # Add Adaptive Learning Context
     try:

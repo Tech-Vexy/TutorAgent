@@ -259,10 +259,23 @@ with tab_memory:
             difficulty = st.selectbox("Difficulty Level", ["easy", "medium", "hard"],
                                       index=["easy", "medium", "hard"].index(profile.get("difficulty_level", "medium")))
             
+            # Language preference - supports Kiswahili for Swahili subjects
+            lang_options = ["auto", "en", "sw"]
+            lang_labels = {"auto": "🌐 Auto-detect", "en": "🇬🇧 English", "sw": "🇰🇪 Kiswahili"}
+            current_lang = profile.get("preferred_language", "auto")
+            language = st.selectbox(
+                "Response Language",
+                lang_options,
+                index=lang_options.index(current_lang) if current_lang in lang_options else 0,
+                format_func=lambda x: lang_labels.get(x, x),
+                help="Auto: Uses Kiswahili for Swahili subjects, English otherwise"
+            )
+            
             if st.button("Save Preferences"):
                 try:
                     requests.post(f"{API_URL}/profile/{st.session_state.user_id}/preference", json={"key": "preferred_style", "value": style})
                     requests.post(f"{API_URL}/profile/{st.session_state.user_id}/preference", json={"key": "difficulty_level", "value": difficulty})
+                    requests.post(f"{API_URL}/profile/{st.session_state.user_id}/preference", json={"key": "preferred_language", "value": language})
                     st.success("Preferences saved!")
                 except Exception as e:
                     st.error(f"Failed to save: {e}")
