@@ -15,10 +15,16 @@ import random
 from groq import RateLimitError, APIError
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage, ToolMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
+try:
+    from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
+except ImportError:
+    ChatHuggingFace = None
+    HuggingFaceEndpoint = None
+
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
 from deepagents import create_deep_agent
-from tools import generate_educational_plot, generate_kcse_quiz, learn_skill, search_skills, web_search, run_python, add_knowledge, add_knowledge_url, search_knowledge
+from tools import generate_educational_plot, generate_kcse_quiz, learn_skill, search_skills, web_search, run_python, add_knowledge, add_knowledge_url, search_knowledge, generate_image
 from skills_db import EpisodicMemory, KnowledgeBase, SkillManager
 from prompts import (
     ROUTER_SYSTEM_PROMPT,
@@ -34,35 +40,13 @@ from prompts import (
 
 # --- Configuration ---
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-# Allow overriding the smart model via environment
-SMART_MODEL = os.getenv("SMART_MODEL", "gemini-1.5-pro")
-# Allow overriding the fast model
-FAST_MODEL = os.getenv("FAST_MODEL", "gemini-1.5-flash")
+MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "google").lower() # "google" or "huggingface"
 
 # --- Models ---
-# Fast model for routing and simple chats (Gemini 1.5 Flash)
-fast_llm = ChatGoogleGenerativeAI(
-    model=FAST_MODEL,
-    google_api_key=GOOGLE_API_KEY,
-    temperature=0,
-    max_retries=2,
-    convert_system_message_to_human=True # Gemini sometimes prefers this
-)
+from model_manager import model_manager
 
-# Smart model for deep reasoning and tools (Gemini 1.5 Pro)
-smart_llm = ChatGoogleGenerativeAI(
-    model=SMART_MODEL,
-    google_api_key=GOOGLE_API_KEY,
-    temperature=0.5,
-    max_retries=3
-)
-
-# Vision model (Gemini 1.5 Pro/Flash are natively multimodal)
-vision_llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash", # Flash is excellent for vision and fast
-    google_api_key=GOOGLE_API_KEY,
-    temperature=0.2
-)
+# We access models dynamically via model_manager.get_model()
+# to allow for runtime switching.
 
 # Initialize Episodic Memory
 episodic_memory = EpisodicMemory()
@@ -70,6 +54,10 @@ episodic_memory = EpisodicMemory()
 knowledge_base = KnowledgeBase()
 # Initialize Skill Manager
 skill_manager = SkillManager()
+# Initialize Conversation Summarizer for long context management
+from conversation_summarizer import conversation_summarizer
+# Initialize Learning Profile for adaptive tutoring
+from learning_profile import get_learning_profile
 
 # --- State Definition ---
 MAX_TOOL_CALLS = int(os.getenv("MAX_TOOL_CALLS", "4"))
@@ -106,20 +94,47 @@ class ReviewOutput(BaseModel):
 
 def clean_messages(messages: List[BaseMessage]) -> List[BaseMessage]:
     """
-    Cleans messages by truncating large base64 image strings to prevent token limit errors.
-    Also normalizes any unexpected content types gracefully.
+    Cleans messages to prevent 413 Payload Too Large errors:
+    1. Limits history to last N messages
+    2. Removes image data from multimodal messages
+    3. Truncates very long text
     """
+    # Limit history to prevent huge payloads
+    max_history = int(os.getenv("MAX_HISTORY_MESSAGES", "20"))
+    if len(messages) > max_history:
+        messages = messages[-max_history:]
+    
     cleaned = []
     for msg in messages:
         content = msg.content
-        if isinstance(content, str):
+        
+        # Handle multimodal content (list with images/text)
+        if isinstance(content, list):
+            new_content = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") == "image_url":
+                        # Replace image with text marker
+                        new_content.append({"type": "text", "text": "[Image in history]"})
+                    elif item.get("type") == "text":
+                        # Keep text but truncate if very long
+                        text = item.get("text", "")
+                        if len(text) > 25000:
+                            text = text[:25000] + "...[truncated]"
+                        new_content.append({"type": "text", "text": text})
+            content = new_content
+        
+        # Handle string content
+        elif isinstance(content, str):
+            # Remove generated image data
             if "[IMAGE_GENERATED_BASE64_DATA:" in content:
-                # Truncate the base64 part
                 start = content.find("[IMAGE_GENERATED_BASE64_DATA:")
                 end = content.find("]", start)
                 if end != -1:
-                    # Keep the marker but remove the data
                     content = content[:start] + "[IMAGE_DATA_HIDDEN]" + content[end+1:]
+            # Truncate very long strings
+            if len(content) > 25000:
+                content = content[:25000] + "...[truncated]"
         
         # Reconstruct message with cleaned content
         if isinstance(msg, HumanMessage):
@@ -176,19 +191,28 @@ async def router_node(state: AgentState):
         return {"intent": "VISION_ANALYSIS", "pedagogy_strategy": "SOCRATIC_GUIDE"}
 
     # Use structured output for text classification
-    structured_llm = fast_llm.with_structured_output(RouterOutput)
+    structured_llm = model_manager.get_model("fast").with_structured_output(RouterOutput)
     system_prompt = ROUTER_SYSTEM_PROMPT
     
     # We only send the last message to the router to save tokens/latency, or a summary
     # For better context, we might send the last few.
     # Clean messages to remove large base64 strings
-    cleaned_history = clean_messages(messages[-3:])
+    # We pass more context to Router now to better understand intent
+    cleaned_history = clean_messages(messages[-5:])
     response = await structured_llm.ainvoke([SystemMessage(content=system_prompt)] + cleaned_history)
     
-    return {
+    updates = {
         "intent": response.intent,
         "pedagogy_strategy": response.pedagogy_strategy
     }
+    
+    # Smart Model Switching:
+    # If the task requires complex reasoning, automatically upgrade to the smart model
+    if response.intent == "COMPLEX_REASONING":
+        print("\n🚀 Smart Switching: Upgrading to SMART model for complex reasoning task.\n")
+        updates["model_preference"] = "smart"
+        
+    return updates
 
 async def vision_node(state: AgentState):
     """
@@ -200,10 +224,18 @@ async def vision_node(state: AgentState):
     
     system_prompt = VISION_SYSTEM_PROMPT
     
-    response = await vision_llm.ainvoke([SystemMessage(content=system_prompt)] + [messages[-1]])
+    try:
+        response = await model_manager.get_model("vision").ainvoke([SystemMessage(content=system_prompt)] + [messages[-1]])
+        content = f"Image Analysis:\n{response.content}"
+    except Exception as e:
+        # Handle 413 or other API errors
+        if "413" in str(e) or "Payload Too Large" in str(e):
+             content = "Error: The image provided is too large for the vision model. Please try resizing it or using a smaller file."
+        else:
+             content = f"Error analyzing image: {str(e)}"
     
     # We return the analysis as an AI message, which will then be passed to the deep thinker or returned
-    return {"messages": [AIMessage(content=f"Image Analysis:\n{response.content}")]}
+    return {"messages": [AIMessage(content=content)]}
 
 async def simple_chat_node(state: AgentState):
     """
@@ -230,9 +262,9 @@ async def simple_chat_node(state: AgentState):
 
     full_system_prompt = system_prompt + memory_context
 
-    # Clean messages and limit history to last 5 to prevent token overflow
-    cleaned_history = clean_messages(messages[-5:])
-    response = await fast_llm.ainvoke([SystemMessage(content=full_system_prompt)] + cleaned_history)
+    # Clean messages (let clean_messages handle the limit)
+    cleaned_history = clean_messages(messages)
+    response = await model_manager.get_model("fast").ainvoke([SystemMessage(content=full_system_prompt)] + cleaned_history)
     return {"messages": [response]}
 
 
@@ -294,10 +326,12 @@ async def deep_thinker_node(state: AgentState):
 
     # Select model based on preference
     # Defaulting to Gemini 1.5 Pro for smart and Flash for everything else
+    # Select model based on preference
+    # Defaulting to Gemini 1.5 Pro for smart and Flash for everything else
     if model_pref == "fast":
-        selected_llm = fast_llm
+        selected_llm = model_manager.get_model("fast")
     else:
-        selected_llm = smart_llm
+        selected_llm = model_manager.get_model("smart")
     
     # --- Deep Agent Integration ---
     
@@ -311,11 +345,34 @@ async def deep_thinker_node(state: AgentState):
         run_python,
         add_knowledge,
         add_knowledge_url,
+        add_knowledge_url,
         search_knowledge,
+        generate_image,
     ]
+    
+    # --- Integration: Tavily MCP Tools ---
+    try:
+        from mcp_tool_adapter import get_mcp_tools
+        mcp_tools = await get_mcp_tools()
+        if mcp_tools:
+            # Avoid duplicate tool names if possible, or let LLM decide
+            # MCP tools might be named 'tavily_web_search' vs existing 'web_search'
+            tools.extend(mcp_tools)
+    except Exception as e:
+        # Log error but don't crash if MCP fails (e.g. if subprocess fails)
+        pass # In production, use a logger
     
     # Dynamic System Prompt based on Strategy
     base_prompt = DEEP_THINKER_BASE_PROMPT.format(memory_context=memory_context, knowledge_context=knowledge_context)
+    
+    # Add Adaptive Learning Context
+    try:
+        learner_profile = get_learning_profile(student_id)
+        learner_context = learner_profile.get_learning_context()
+        if learner_context:
+            base_prompt += f"\n\nLEARNER PROFILE:\n{learner_context}\n(Adapt your explanation based on this learner's profile.)"
+    except Exception:
+        pass
     
     if plan:
         base_prompt += f"\n\nCURRENT PLAN:\n{plan}\n(Follow this plan to solve the problem.)"
@@ -337,7 +394,20 @@ async def deep_thinker_node(state: AgentState):
     )
     
     # Clean messages to remove large base64 strings from history to save tokens
-    cleaned_messages = clean_messages(messages[-8:])
+    cleaned_messages = clean_messages(messages)
+    
+    # Apply conversation summarization for very long sessions
+    # This compacts old messages into a summary while keeping recent ones intact
+    thread_id = user_profile.get("student_id", "default")
+    if conversation_summarizer.should_summarize(cleaned_messages):
+        try:
+            summarizer_llm = model_manager.get_model("fast")
+            cleaned_messages, summary = await conversation_summarizer.summarize_and_compact(
+                cleaned_messages, thread_id, summarizer_llm
+            )
+            print(f"\n📝 Conversation summarized. Summary length: {len(summary)} chars\n")
+        except Exception as e:
+            print(f"Summarization skipped: {e}")
     
     try:
         # Invoke Deep Agent
@@ -381,6 +451,7 @@ def tool_node(state: AgentState):
         add_knowledge,
         add_knowledge_url,
         search_knowledge,
+        generate_image,
     ]
     tool_executor = ToolNode(tools)
     return tool_executor.invoke(state)
@@ -440,7 +511,11 @@ async def planner_node(state: AgentState):
     system_prompt = PLANNING_PROMPT.format(skills=skills_text, query=query_text)
     
     # Use fast model for planning to save time/cost
-    response = await fast_llm.ainvoke([SystemMessage(content=system_prompt)])
+    # Gemini requires at least one non-system message, so include the user's query
+    response = await model_manager.get_model("fast").ainvoke([
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=query_text)
+    ])
     
     return {"plan": response.content}
 
@@ -455,10 +530,10 @@ async def reflection_node(state: AgentState):
     messages = state["messages"]
     # We need the full context to decide
     # Use structured output
-    structured_llm = fast_llm.with_structured_output(SkillSaveOutput)
+    structured_llm = model_manager.get_model("fast").with_structured_output(SkillSaveOutput)
     
     # Clean messages
-    cleaned_history = clean_messages(messages[-5:])
+    cleaned_history = clean_messages(messages)
     
     try:
         response = await structured_llm.ainvoke([SystemMessage(content=SKILL_SAVE_PROMPT)] + cleaned_history)
@@ -488,10 +563,10 @@ async def reviewer_node(state: AgentState):
     if not isinstance(last_message, AIMessage):
         return {"review_count": 0} # No op
         
-    structured_llm = fast_llm.with_structured_output(ReviewOutput)
+    structured_llm = model_manager.get_model("fast").with_structured_output(ReviewOutput)
     
     # We send the last few messages for context, plus the candidate response
-    cleaned_history = clean_messages(messages[-3:])
+    cleaned_history = clean_messages(messages[-10:])
     
     try:
         review = await structured_llm.ainvoke([SystemMessage(content=REVIEWER_PROMPT)] + cleaned_history)

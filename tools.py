@@ -1,4 +1,5 @@
 import matplotlib
+import seaborn as sns
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import io
@@ -13,6 +14,21 @@ warnings.filterwarnings(
 from langchain_core.tools import tool
 from skills_db import SkillManager, KnowledgeBase
 from tavily import TavilyClient
+try:
+    from langchain_community.tools import DuckDuckGoSearchRun
+    ddg_search = DuckDuckGoSearchRun()
+except ImportError:
+    ddg_search = None
+
+try:
+    from huggingface_hub import InferenceClient
+    # Default to a standard stable diffusion model
+    # User mentioned "nano banana" - checking if they meant "stable-diffusion-v1-5" or simlar.
+    # Using SDXL base for quality.
+    HF_MODEL = "stabilityai/stable-diffusion-xl-base-1.0"
+    hf_client = InferenceClient(model=HF_MODEL, token=os.getenv("HUGGINGFACEHUB_API_TOKEN"))
+except (ImportError, Exception):
+    hf_client = None
 import os
 import math
 import contextlib
@@ -56,7 +72,7 @@ def generate_educational_plot(python_code: str) -> str:
                 python_code = python_code.replace('; ', ';\n').replace(';', ';\n')
             
             # Safe execution environment
-            local_scope = {'plt': plt, 'matplotlib': matplotlib}
+            local_scope = {'plt': plt, 'matplotlib': matplotlib, 'sns': sns}
             exec(python_code, {}, local_scope)
         finally:
             # Restore plt.show
@@ -77,32 +93,46 @@ def generate_educational_plot(python_code: str) -> str:
             pass
         buf.close()
 
+# --- Instructor Client ---
+try:
+    import instructor
+    from openai import OpenAI
+    from quiz_schemas import Quiz
+    # Initialize patched client (requires OPENAI_API_KEY)
+    # Check if key exists to avoid crash on import/init
+    if os.getenv("OPENAI_API_KEY"):
+        instructor_client = instructor.from_openai(OpenAI())
+    else:
+        instructor_client = None
+except ImportError:
+    instructor_client = None
+
 @tool
 def generate_kcse_quiz(topic: str) -> str:
     """
-    Generates a 3-question KCSE-style quiz on the given topic.
-    Returns the quiz as a formatted string.
+    Generates a 3-question KCSE-style quiz on the given topic using structured output.
+    Returns the formatted quiz.
     """
-    # In a real scenario, this might call an LLM or database. 
-    # For this tool definition, we'll return a placeholder or use the LLM calling it to generate content if it was a direct generation tool.
-    # However, the prompt implies this is a tool the agent calls. 
-    # Since I cannot call an LLM inside this tool easily without circular deps or passing it in, 
-    # I will return a structured request that the calling agent (smart_llm) will likely interpret or I can mock it.
-    # But usually, "generate_quiz" tools in these architectures are often handled by the LLM itself or a specific chain.
-    # Given the instructions, I will implement a simple template response that the LLM can present, 
-    # or better, since the smart_llm has this tool, it might expect the tool to do the work.
-    # Let's make it return a prompt for the LLM to fill or a static structure.
-    # Actually, let's make it a bit dynamic if possible, or just return a string the LLM uses.
-    
-    return f"""
-    KCSE Quiz on {topic}:
-    
-    1. Question 1 (2 marks): [Insert specific question about {topic} relevant to Kenyan syllabus]
-    2. Question 2 (2 marks): [Insert specific question about {topic}]
-    3. Question 3 (1 mark): [Insert specific question about {topic}]
-    
-    (Please ask the student to attempt these questions.)
-    """
+    if not instructor_client:
+        return f"Error: Instructor/OpenAI not available. Placeholder quiz for {topic}: 1. What is {topic}? 2. Explain {topic}. 3. Define {topic}."
+
+    try:
+        # Generate structured quiz
+        quiz = instructor_client.chat.completions.create(
+            model="gpt-3.5-turbo", # Or gpt-4o, etc.
+            response_model=Quiz,
+            messages=[
+                {"role": "user", "content": f"Generate a hard KCSE quiz on {topic}."}
+            ]
+        )
+        
+        # Format output
+        out = f"**KCSE Quiz on {quiz.topic}** (Total Marks: {quiz.total_marks})\n\n"
+        for q in quiz.questions:
+            out += f"{q.id}. {q.text} ({q.marks} marks)\n   *Guide: {q.answer_guide}*\n"
+        return out
+    except Exception as e:
+        return f"Error generating quiz with instructor: {e}"
 
 @tool
 def learn_skill(name: str, code: str, description: str) -> str:
@@ -167,7 +197,20 @@ def web_search(query: str, max_results: int = 5) -> str:
             "results": simplified[:max_results]
         }
         return json.dumps(out)
+        return json.dumps(out)
     except Exception as e:
+        # Fallback to DuckDuckGo if Tavily fails
+        if ddg_search:
+            try:
+                # DDG returns a string, so we wrap it
+                raw_res = ddg_search.run(query)
+                return json.dumps({
+                    "query": query,
+                    "source": "duckduckgo",
+                    "results": [{"title": "DuckDuckGo Result", "url": "", "snippet": raw_res}]
+                })
+            except Exception as e2:
+                return json.dumps({"error": f"Tavily failed: {str(e)}. DDG failed: {str(e2)}"})
         return json.dumps({"error": str(e)})
 
 @tool
@@ -258,3 +301,25 @@ def run_python(code: str) -> str:
             pass
     output = buf.getvalue()
     return output if output else ""
+
+@tool
+def generate_image(prompt: str) -> str:
+    """
+    Generates an image based on the text prompt using Hugging Face (Stable Diffusion).
+    Returns a BASE64 string of the image to displaying it directly.
+    """
+    if not hf_client:
+        return "Error: Image generation is not available (missing huggingface_hub or HUGGINGFACEHUB_API_TOKEN)."
+    
+    try:
+        # InferenceClient.text_to_image returns a PIL Image
+        image = hf_client.text_to_image(prompt)
+        
+        # Convert to base64
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        buf.seek(0)
+        b64_data = base64.b64encode(buf.getvalue()).decode('utf-8')
+        return f"[IMAGE_GENERATED_BASE64_DATA: {b64_data}]"
+    except Exception as e:
+        return f"Error generating image: {str(e)}"

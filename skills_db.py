@@ -1,5 +1,19 @@
 """Vector database for skill storage and retrieval using ChromaDB."""
 
+# Monkey patch pydantic.BaseSettings for older/incompatible libraries (like specific chromadb versions)
+try:
+    import pydantic
+    try:
+        from pydantic_settings import BaseSettings
+    except ImportError:
+        # Fallback if pydantic-settings not installed (though it should be)
+        BaseSettings = None 
+
+    if BaseSettings and not hasattr(pydantic, 'BaseSettings'):
+        pydantic.BaseSettings = BaseSettings
+except ImportError:
+    pass
+
 import chromadb
 from typing import List, Dict, Optional
 import uuid
@@ -8,7 +22,16 @@ from datetime import datetime
 
 class SkillManager:
     def __init__(self, persist_directory: str = "./chroma_db"):
-        self.client = chromadb.PersistentClient(path=persist_directory)
+        if hasattr(chromadb, 'PersistentClient'):
+            self.client = chromadb.PersistentClient(path=persist_directory)
+        else:
+            # Fallback for Chroma 0.3.x
+            from chromadb.config import Settings
+            self.client = chromadb.Client(Settings(
+                chroma_db_impl="duckdb+parquet",
+                persist_directory=persist_directory
+            ))
+
         self.collection = self.client.get_or_create_collection(
             name="skills",
             metadata={"hnsw:space": "cosine"}
@@ -61,7 +84,15 @@ class SkillManager:
 
 class EpisodicMemory:
     def __init__(self, persist_directory: str = "./chroma_db"):
-        self.client = chromadb.PersistentClient(path=persist_directory)
+        if hasattr(chromadb, 'PersistentClient'):
+            self.client = chromadb.PersistentClient(path=persist_directory)
+        else:
+            from chromadb.config import Settings
+            self.client = chromadb.Client(Settings(
+                chroma_db_impl="duckdb+parquet",
+                persist_directory=persist_directory
+            ))
+
         self.collection = self.client.get_or_create_collection(
             name="episodic_memory",
             metadata={"hnsw:space": "cosine"}
@@ -126,7 +157,15 @@ class EpisodicMemory:
 class KnowledgeBase:
     """Lightweight retrieval-augmented knowledge base using ChromaDB."""
     def __init__(self, persist_directory: str = "./chroma_db"):
-        self.client = chromadb.PersistentClient(path=persist_directory)
+        if hasattr(chromadb, 'PersistentClient'):
+            self.client = chromadb.PersistentClient(path=persist_directory)
+        else:
+            from chromadb.config import Settings
+            self.client = chromadb.Client(Settings(
+                chroma_db_impl="duckdb+parquet",
+                persist_directory=persist_directory
+            ))
+
         self.collection = self.client.get_or_create_collection(
             name="knowledge_base",
             metadata={"hnsw:space": "cosine"}

@@ -73,9 +73,18 @@ TopScore AI is an advanced, multimodal AI tutor designed specifically for the Ke
     ```
     The server will start on `http://0.0.0.0:8080`.
 
-2.  **Run the Test Client:**
-    *   **Web Client:** Open `test_client.html` in your web browser.
-    *   **Terminal Client:** Run `python test_client.py`.
+2.  **Open a Client:**
+    
+    **Option A: Streamlit Dashboard (Recommended)**
+    *   Run: `run_dashboard.bat` (Windows)
+    *   Provides: Chat, History, Settings, Status
+    
+    **Option B: Web Client**
+    *   Open: `chat_persistent.html`
+    *   Provides: Reliable chat with auto-reconnect
+
+    **Option C: Terminal**
+    *   Run: `python test_client.py`
 
 3.  **Interact:**
     *   Type messages to chat.
@@ -145,6 +154,138 @@ Behavior:
 Limitations (current):
 - Systems path handles text messages. Image analysis and Python tools continue to run via the existing LangGraph flow.
 - If you need tools within Groq Systems, configure them inside your System in the Console. The server does not yet forward tool calls from Systems back to the client.
+
+## OpenTelemetry & LangSmith Tracing
+
+TopScore AI includes **automatic OpenTelemetry tracing** via LangSmith's native OTEL integration. This provides deep visibility into your agent's behavior, LLM calls, tool usage, and performance metrics.
+
+### 🎯 What Gets Traced
+
+The `langsmith[otel]` package automatically instruments:
+- ✅ **LangChain chains and agents** - Full execution flows
+- ✅ **LLM calls** - Groq, OpenAI, Google Gemini, etc.
+- ✅ **Tools** - Plot generation, quiz creation, web search, etc.
+- ✅ **Prompts** - Input prompts and responses
+- ✅ **Token usage** - Track costs and performance
+- ✅ **Latency** - Measure response times
+- ✅ **Errors** - Automatic error capture with stack traces
+
+### 📋 Setup Instructions
+
+1. **Get a LangSmith API key**  
+   Sign up at [smith.langchain.com](https://smith.langchain.com/) and create an API key
+
+2. **Configure environment variables** in your `.env` file:
+   ```bash
+   # Enable OpenTelemetry tracing
+   LANGSMITH_OTEL_ENABLED=true
+   
+   # Enable LangSmith tracing (required)
+   LANGSMITH_TRACING=true
+   
+   # Your LangSmith API key
+   LANGSMITH_API_KEY=your_api_key_here
+   
+   # Optional: Project name for organizing traces
+   LANGSMITH_PROJECT=TopScore-AI
+   
+   # Optional: LangSmith endpoint (default shown)
+   LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+   ```
+
+3. **Start the server**
+   ```bash
+   python server.py
+   ```
+   
+   You'll see a confirmation message:
+   ```
+   ============================================================
+   OpenTelemetry Configuration (LangSmith Native)
+   ============================================================
+   OTEL Enabled: True
+   Tracing Enabled: True
+   Endpoint: https://api.smith.langchain.com
+   Project: TopScore-AI
+   
+   📊 Automatic instrumentation active for:
+     ✓ LangChain chains and agents
+     ✓ LLM calls (Groq, OpenAI, Google, etc.)
+     ✓ Tools and function calls
+     ✓ Retrievers and vector stores
+     ✓ Prompts and prompt templates
+   
+   🔍 View traces at: https://smith.langchain.com/
+   ============================================================
+   ```
+
+4. **View traces**
+   - Go to [smith.langchain.com](https://smith.langchain.com/)
+   - Select your project (e.g., "TopScore-AI")
+   - Browse traces to see detailed execution flows
+   - Click on any trace to see:
+     - Full conversation history
+     - LLM prompts and responses
+     - Tool calls and results
+     - Token usage and costs
+     - Latency breakdown
+     - Error details (if any)
+
+### 🔧 Advanced Configuration
+
+**Disable tracing entirely:**
+```bash
+DISABLE_TRACING=1
+```
+
+**Multiple workspaces:**
+If your API key is linked to multiple workspaces, specify which one:
+```bash
+LANGSMITH_WORKSPACE_ID=your_workspace_id
+```
+
+**Performance impact:**
+- Tracing adds minimal overhead (<50ms per request)
+- All tracing is async and non-blocking
+- Failed trace uploads don't affect app functionality
+- To reduce latency further, disable tracing for production
+
+### 📊 Example Trace View
+
+When you chat with the tutor, each interaction creates a trace showing:
+
+```
+User Message: "Draw a graph of y = x^2"
+  ├─ Router Node (50ms)
+  │   └─ Intent: COMPLEX_REASONING
+  ├─ Deep Thinker Node (1.2s)
+  │   ├─ LLM Call: llama-3.3-70b (800ms)
+  │   │   ├─ Prompt: [DEEP_THINKER_BASE_PROMPT + user message]
+  │   │   ├─ Response: [Explanation + tool call]
+  │   │   └─ Tokens: 450 input, 120 output
+  │   └─ Tool: generate_educational_plot (400ms)
+  │       ├─ Input: Python code for plotting
+  │       └─ Output: Base64 image
+  └─ Response: Explanation + plot image
+```
+
+### 🆚 Legacy vs New Tracing
+
+**Old way (deprecated):**
+- Manual OpenTelemetry setup
+- Separate instrumentation
+- Complex configuration
+
+**New way (current):**
+- Automatic with `langsmith[otel]`
+- Zero configuration needed
+- Just set environment variables
+
+### 📚 Learn More
+
+- [LangSmith OpenTelemetry Docs](https://docs.langchain.com/langsmith/trace-with-opentelemetry)
+- [OpenTelemetry Concepts](https://opentelemetry.io/docs/concepts/)
+- [LangSmith Dashboard](https://smith.langchain.com/)
 
 ## Response caching (in-memory)
 To speed up repeated questions, the server caches recent responses and replays them instantly on identical prompts.

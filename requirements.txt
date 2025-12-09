@@ -2,10 +2,9 @@ fastapi>=0.104.1
 uvicorn[standard]>=0.24.0
 langgraph
 langchain
-langchain-openai
 langchain-core
 matplotlib
-numpy
+numpy>=2.0.0
 pydantic
 python-multipart
 chromadb
@@ -26,3 +25,13 @@ groq
 langsmith
 deepagents
 langchain-google-genai
+seaborn
+duckduckgo-search
+pillow
+huggingface_hub
+google-adk
+langchain-mcp-adapters
+mcp-tavily
+instructor
+langchain-huggingface
+langsmith[otel]
