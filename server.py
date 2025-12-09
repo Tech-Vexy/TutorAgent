@@ -286,6 +286,9 @@ API_TAGS = [
     }
 ]
 
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
 app = FastAPI(
     title=API_TITLE,
     version=API_VERSION,
@@ -304,6 +307,18 @@ app = FastAPI(
         "url": "https://opensource.org/licenses/MIT",
     }
 )
+
+# Serve the chat interface directly
+@app.get("/chat_app", response_class=FileResponse)
+async def read_chat_app():
+    return FileResponse("chat_persistent.html")
+
+# Mount static files to serve other potential assets (optional but good practice)
+# We use try/except block just in case the directory issues occur on some environments
+try:
+    app.mount("/static", StaticFiles(directory="."), name="static")
+except Exception:
+    pass
 
 # Setup OpenTelemetry
 if setup_opentelemetry:

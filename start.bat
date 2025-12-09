@@ -1,4 +1,4 @@
 @echo off
 echo Starting TutorAgent with SelectorEventLoop (Windows Fix)...
-python run.py
+.\.venv\Scripts\python.exe run.py
 pause

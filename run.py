@@ -2,6 +2,10 @@ import sys
 import asyncio
 import os
 import uvicorn
+import os
+
+# Fix for Hugging Face Tokenizers deadlock warning
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 def main():
     # Force SelectorEventLoop on Windows for psycopg compatibility

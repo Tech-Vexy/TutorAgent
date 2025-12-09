@@ -323,3 +323,60 @@ def generate_image(prompt: str) -> str:
         return f"[IMAGE_GENERATED_BASE64_DATA: {b64_data}]"
     except Exception as e:
         return f"Error generating image: {str(e)}"
+
+@tool
+def recognize_text(image_input: str) -> str:
+    """
+    Recognizes and extracts text from an image using Google's vision capabilities (equivalent to capabilities found in ML Kit).
+    
+    Args:
+        image_input: The local file path or URL of the image to process.
+    """
+    # Import locally to avoid circular dependencies or load issues if not needed
+    try:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        from langchain_core.messages import HumanMessage
+        import mimetypes
+    except ImportError:
+        return "Error: langchain-google-genai library is missing."
+
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        return "Error: GOOGLE_API_KEY not found. Cannot perform text recognition."
+
+    try:
+        # Use gemini-1.5-flash for speed and cost-effectiveness
+        llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=api_key, temperature=0)
+        
+        # Prepare content
+        # Note: We send a prompt to extract text
+        content_parts = [
+            {"type": "text", "text": "Please extract all the text you can see in this image. Output ONLY the extracted text, preserving the layout if possible. Do not add any conversational filler."}
+        ]
+
+        # Handle URL vs Local File
+        if image_input.startswith("http://") or image_input.startswith("https://"):
+            content_parts.append({"type": "image_url", "image_url": image_input})
+        else:
+             # Assume local path
+             if not os.path.exists(image_input):
+                 return f"Error: File not found at {image_input}"
+             
+             # Guess mime type
+             mime_type, _ = mimetypes.guess_type(image_input)
+             if not mime_type:
+                 mime_type = "image/png"
+             
+             with open(image_input, "rb") as f:
+                 img_data = base64.b64encode(f.read()).decode("utf-8")
+             
+             # Construct data URI
+             data_uri = f"data:{mime_type};base64,{img_data}"
+             content_parts.append({"type": "image_url", "image_url": data_uri})
+        
+        msg = HumanMessage(content=content_parts)
+        response = llm.invoke([msg])
+        return response.content
+
+    except Exception as e:
+        return f"Error recognizing text: {str(e)}"

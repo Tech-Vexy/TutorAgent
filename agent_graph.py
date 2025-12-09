@@ -22,9 +22,10 @@ except ImportError:
     HuggingFaceEndpoint = None
 
 from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import create_react_agent
 from pydantic import BaseModel, Field
 from deepagents import create_deep_agent
-from tools import generate_educational_plot, generate_kcse_quiz, learn_skill, search_skills, web_search, run_python, add_knowledge, add_knowledge_url, search_knowledge, generate_image
+from tools import generate_educational_plot, generate_kcse_quiz, learn_skill, search_skills, web_search, run_python, add_knowledge, add_knowledge_url, search_knowledge, generate_image, recognize_text
 from skills_db import EpisodicMemory, KnowledgeBase, SkillManager
 from prompts import (
     ROUTER_SYSTEM_PROMPT,
@@ -35,7 +36,10 @@ from prompts import (
     PEDAGOGY_DIRECT,
     PLANNING_PROMPT,
     SKILL_SAVE_PROMPT,
-    REVIEWER_PROMPT
+    REVIEWER_PROMPT,
+    LENS_MATH_PROMPT,
+    LENS_TRANSLATE_PROMPT,
+    LENS_EXPLAIN_PROMPT
 )
 
 # --- Configuration ---
@@ -75,6 +79,7 @@ class AgentState(TypedDict):
     plan: Optional[str]
     review_count: int
     response_language: str  # "sw" for Kiswahili, "en" for English
+    lens_mode: Optional[str] # "solve", "translate", "explain", "vision"
 
 # --- Router Schema ---
 class RouterOutput(BaseModel):
@@ -225,10 +230,26 @@ async def router_node(state: AgentState):
                     break
     
     if has_image:
+        # Check for explicit lens mode in message metadata (if passed via LangChain message additional_kwargs or content)
+        # However, since we receive clean messages, we might need to rely on the server.py to have injected it into state,
+        # OR we check if the user text explicitly triggers it.
+        
+        lens_mode = "vision"
+        
+        # Simple heuristic if frontend sends text like "Please solve this image"
+        lower_query = query_text.lower()
+        if "solve" in lower_query or "calculate" in lower_query or "math" in lower_query:
+            lens_mode = "solve"
+        elif "translate" in lower_query:
+            lens_mode = "translate"
+        elif "explain" in lower_query or "diagram" in lower_query:
+            lens_mode = "explain"
+            
         return {
             "intent": "VISION_ANALYSIS", 
             "pedagogy_strategy": "SOCRATIC_GUIDE",
-            "response_language": detected_lang
+            "response_language": detected_lang,
+            "lens_mode": lens_mode
         }
 
     # Use structured output for text classification
@@ -266,8 +287,20 @@ async def vision_node(state: AgentState):
     # The vision model needs the image message. 
     # We assume the last message contains the image in the correct format.
     
+    # Determine which prompt to use based on lens_mode
+    lens_mode = state.get("lens_mode", "vision")
+    
+    if lens_mode == "solve":
+        base_prompt = LENS_MATH_PROMPT
+    elif lens_mode == "translate":
+        base_prompt = LENS_TRANSLATE_PROMPT.format(target_language=response_language)
+    elif lens_mode == "explain":
+        base_prompt = LENS_EXPLAIN_PROMPT
+    else:
+        base_prompt = VISION_SYSTEM_PROMPT
+
     # Apply language instruction to vision prompt
-    system_prompt = get_localized_prompt(VISION_SYSTEM_PROMPT, response_language)
+    system_prompt = get_localized_prompt(base_prompt, response_language)
     
     try:
         response = await model_manager.get_model("vision").ainvoke([SystemMessage(content=system_prompt)] + [messages[-1]])
@@ -396,9 +429,9 @@ async def deep_thinker_node(state: AgentState):
         run_python,
         add_knowledge,
         add_knowledge_url,
-        add_knowledge_url,
         search_knowledge,
         generate_image,
+        recognize_text,
     ]
     
     # --- Integration: Tavily MCP Tools ---
@@ -440,12 +473,11 @@ async def deep_thinker_node(state: AgentState):
     full_system_prompt = f"{base_prompt}\n\n{pedagogy_instruction}"
     
     # Create Deep Agent
-    # We create a fresh one each time to inject the dynamic prompt and context
-    # In a more persistent setup, we might cache it, but the prompt changes per turn.
-    deep_agent = create_deep_agent(
+    # We use create_react_agent for optimized tool calling (parallel execution support)
+    deep_agent = create_react_agent(
         model=selected_llm,
         tools=tools,
-        system_prompt=full_system_prompt
+        state_modifier=full_system_prompt
     )
     
     # Clean messages to remove large base64 strings from history to save tokens
@@ -507,6 +539,7 @@ def tool_node(state: AgentState):
         add_knowledge_url,
         search_knowledge,
         generate_image,
+        recognize_text,
     ]
     tool_executor = ToolNode(tools)
     return tool_executor.invoke(state)

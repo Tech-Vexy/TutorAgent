@@ -26,9 +26,9 @@ class ModelManager:
         self.groq_api_key = os.getenv("GROQ_API_KEY")
         
         # Default Model IDs
-        self.fast_model_id = os.getenv("FAST_MODEL", "llama-3.1-8b-instant")
-        self.smart_model_id = os.getenv("SMART_MODEL", "llama-3.3-70b-versatile")
-        self.vision_model_id = os.getenv("VISION_MODEL", "llama-3.2-90b-vision-preview")
+        self.fast_model_id = os.getenv("FAST_MODEL", "openai/gpt-oss-20b")
+        self.smart_model_id = os.getenv("SMART_MODEL", "openai/gpt-oss-120b")
+        self.vision_model_id = os.getenv("VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
         
         # Initialize instances
         self.fast_llm = None
@@ -68,21 +68,23 @@ class ModelManager:
                 
         elif self.provider == "groq":
             self.fast_llm = ChatGroq(
-                model=self.fast_model_id,
+                model_name=self.fast_model_id,
                 groq_api_key=self.groq_api_key,
                 temperature=0,
-                max_retries=2
+                max_retries=2,
+                reasoning_effort="low"
             )
             
             self.smart_llm = ChatGroq(
-                model=self.smart_model_id,
+                model_name=self.smart_model_id,
                 groq_api_key=self.groq_api_key,
                 temperature=0.5,
-                max_retries=3
+                max_retries=3,
+                reasoning_effort="medium"
             )
             
             self.vision_llm = ChatGroq(
-                model=self.vision_model_id,
+                model_name=self.vision_model_id,
                 groq_api_key=self.groq_api_key,
                 temperature=0.2
             )
