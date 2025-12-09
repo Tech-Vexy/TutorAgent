@@ -341,7 +341,8 @@ app.add_middleware(
         "http://127.0.0.1:8080",
         "null"  # For file:// protocol
     ],
-    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+    # Regex to allow any localhost port and local network IPs (e.g. mobile testing)
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
