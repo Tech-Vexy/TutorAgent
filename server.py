@@ -225,7 +225,85 @@ async def lifespan(app: FastAPI):
     # Shutdown: Close DB pool
     await pool.close()
 
-app = FastAPI(lifespan=lifespan)
+# --- API Documentation ---
+API_TITLE = "TopScore AI Tutor API"
+API_VERSION = "1.0.0"
+API_DESCRIPTION = """
+# TopScore AI Tutor API 🎓
+
+A powerful AI-powered tutoring system designed for Kenyan students (KCSE/CBC curriculum).
+
+## Features
+
+- 🤖 **Intelligent Tutoring**: Multi-model AI with deep reasoning capabilities
+- 🌍 **Multilingual Support**: Responds in Kiswahili for Swahili subjects, English otherwise
+- 📚 **Knowledge Ingestion**: Upload PDFs, URLs, or connect Google Drive
+- 💾 **Persistent Memory**: Remembers past interactions and learning progress
+- 📊 **Adaptive Learning**: Tracks strengths, weaknesses, and preferred learning style
+- 🎯 **KCSE/CBC Focused**: Tailored for Kenyan education system
+
+## Authentication
+
+Currently, the API uses user IDs for identification. No authentication token required.
+
+## WebSocket
+
+For real-time chat, connect to `/ws/chat` with JSON messages.
+
+## Language Support
+
+The API automatically detects and responds in:
+- **Kiswahili** 🇰🇪: When the subject is Swahili/Kiswahili
+- **English** 🇬🇧: For all other subjects
+
+Users can override this in their profile settings.
+"""
+
+API_TAGS = [
+    {
+        "name": "Chat",
+        "description": "Real-time chat endpoints for tutoring interactions"
+    },
+    {
+        "name": "Threads",
+        "description": "Conversation thread management and message history"
+    },
+    {
+        "name": "Knowledge",
+        "description": "Knowledge base ingestion - upload documents, URLs, or connect Google Drive"
+    },
+    {
+        "name": "Profile",
+        "description": "User learning profile management - preferences, strengths, weaknesses"
+    },
+    {
+        "name": "Models",
+        "description": "AI model configuration and management"
+    },
+    {
+        "name": "System",
+        "description": "System health, info, and configuration endpoints"
+    }
+]
+
+app = FastAPI(
+    title=API_TITLE,
+    version=API_VERSION,
+    description=API_DESCRIPTION,
+    openapi_tags=API_TAGS,
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
+    contact={
+        "name": "TopScore AI Support",
+        "url": "https://github.com/Tech-Vexy/TutorAgent",
+    },
+    license_info={
+        "name": "MIT License",
+        "url": "https://opensource.org/licenses/MIT",
+    }
+)
 
 # Setup OpenTelemetry
 if setup_opentelemetry:
@@ -242,6 +320,8 @@ app.add_middleware(
         "http://127.0.0.1:3000",
         "http://localhost:5500",
         "http://127.0.0.1:5500",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
         "http://localhost:8080",
         "http://127.0.0.1:8080",
         "null"  # For file:// protocol
@@ -253,20 +333,108 @@ app.add_middleware(
 )
 
 
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from fastapi.responses import StreamingResponse, HTMLResponse
+from pydantic import BaseModel, Field
+from typing import List, Optional
+
+# --- API Request/Response Models ---
 
 class ChatRequest(BaseModel):
-    message: str
-    user_id: str = "default_user"
-    thread_id: str = "default_thread"
-    model_preference: str = "fast"
-    stream: bool = True
+    """Request model for chat endpoint"""
+    message: str = Field(..., description="The user's message/question", example="What is photosynthesis?")
+    user_id: str = Field("default_user", description="Unique identifier for the user", example="student_001")
+    thread_id: str = Field("default_thread", description="Conversation thread ID for context continuity", example="thread_abc123")
+    model_preference: str = Field("fast", description="Model to use: 'fast' (quick responses) or 'smart' (deep reasoning)", example="smart")
+    stream: bool = Field(True, description="Whether to stream the response (SSE format)")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "message": "Explain the water cycle in simple terms",
+                "user_id": "student_001",
+                "thread_id": "science_lesson_1",
+                "model_preference": "smart",
+                "stream": True
+            }
+        }
 
-@app.post("/chat")
+class MessageResponse(BaseModel):
+    """A single message in a conversation"""
+    type: str = Field(..., description="Message type: 'user' or 'ai'", example="ai")
+    content: str = Field(..., description="Message content", example="Photosynthesis is the process...")
+    timestamp: Optional[str] = Field(None, description="ISO timestamp of the message")
+
+class ThreadInfo(BaseModel):
+    """Information about a conversation thread"""
+    thread_id: str = Field(..., description="Unique thread identifier")
+    title: str = Field(..., description="Thread title (first message preview)")
+    updated_at: str = Field(..., description="Last update timestamp")
+
+class ProfileUpdate(BaseModel):
+    """Request to update a user preference"""
+    key: str = Field(..., description="Preference key to update", example="preferred_style")
+    value: str = Field(..., description="New value for the preference", example="visual")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "key": "preferred_language",
+                "value": "sw"
+            }
+        }
+
+class TopicRecord(BaseModel):
+    """Record of a learning interaction on a topic"""
+    topic: str = Field(..., description="Topic name", example="Algebra")
+    was_correct: bool = Field(True, description="Whether the user answered correctly")
+
+class UrlRequest(BaseModel):
+    """Request to ingest content from a URL"""
+    url: str = Field(..., description="URL to scrape and ingest into knowledge base", example="https://example.com/biology-notes")
+
+class DriveIngestRequest(BaseModel):
+    """Request to ingest a file from Google Drive"""
+    file_id: str = Field(..., description="Google Drive file ID")
+    file_name: str = Field(..., description="Name of the file for reference")
+
+class ModelUpdate(BaseModel):
+    """Request to update AI model configuration"""
+    type: str = Field(..., description="Model type: 'fast', 'smart', or 'vision'", example="fast")
+    model_id: str = Field(..., description="New model identifier", example="llama-3.1-8b-instant")
+    persist: bool = Field(False, description="Whether to save to .env file")
+
+class StatusResponse(BaseModel):
+    """Standard API status response"""
+    status: str = Field(..., description="Response status: 'success' or 'error'")
+    message: Optional[str] = Field(None, description="Additional message or error details")
+
+class KnowledgeUploadResponse(BaseModel):
+    """Response after knowledge ingestion"""
+    status: str = Field(..., description="Response status")
+    chunks_added: Optional[int] = Field(None, description="Number of chunks added to knowledge base")
+    message: str = Field(..., description="Result message")
+
+class HealthResponse(BaseModel):
+    """Health check response"""
+    status: str = Field(..., description="Server status", example="healthy")
+    database: str = Field(..., description="Database connection status")
+    langsmith_tracing: Optional[bool] = Field(None, description="Whether LangSmith tracing is enabled")
+
+@app.post("/chat", tags=["Chat"], summary="Send a message and get AI response")
 async def chat_endpoint(request: ChatRequest):
     """
-    REST API for Chat. Streams responses (Server-Sent Events format or raw text).
+    Send a message to the AI tutor and receive a streaming response.
+    
+    The AI automatically:
+    - Detects if the subject is Swahili and responds in Kiswahili
+    - Uses appropriate teaching strategies (Socratic or Direct)
+    - Retrieves relevant knowledge from the knowledge base
+    - Adapts to the user's learning profile
+    
+    **Response Format (SSE):**
+    - `{"type": "message", "content": "..."}`  - Text chunks
+    - `{"type": "image", "content": "base64..."}` - Generated images
+    - `data: [DONE]` - End of response
     """
     async def event_generator():
         # Setup similar to WebSocket
@@ -318,10 +486,12 @@ async def chat_endpoint(request: ChatRequest):
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
-@app.get("/memory/{user_id}")
+@app.get("/memory/{user_id}", tags=["Profile"], summary="Get user memory state")
 async def get_memory(user_id: str):
     """
-    Retrieve user profile and memory state.
+    Retrieve the user's profile and episodic memory state.
+    
+    Returns information about past interactions and user preferences.
     """
     profile = await get_or_create_profile(user_id)
     return profile
@@ -630,14 +800,28 @@ async def websocket_endpoint(websocket: WebSocket):
         
         await websocket.close()
 
-@app.get("/")
+@app.get("/", tags=["System"], summary="API Root")
 async def root():
+    """Root endpoint - confirms the API is running."""
     return {"message": "TopScore AI Backend is Running"}
 
-@app.get("/info")
+@app.get("/developer", tags=["System"], summary="Developer Guide")
+def developer_guide():
+    """
+    Returns the HTML Developer Guide with integration details.
+    """
+    with open("api_documentation.html", "r", encoding="utf-8") as f:
+        html_content = f.read()
+    return HTMLResponse(content=html_content, status_code=200)
+
+@app.get("/info", tags=["System"], summary="Get server information")
 async def get_server_info():
     """
-    Provide server information and status.
+    Get detailed server information including:
+    - Current status and version
+    - Available features
+    - Configured AI models
+    - Available API endpoints
     """
     return {
         "status": "running",
@@ -647,7 +831,9 @@ async def get_server_info():
             "websocket": True,
             "message_persistence": True,
             "groq_models": True,
-            "knowledge_ingestion": True
+            "knowledge_ingestion": True,
+            "multilingual": True,
+            "adaptive_learning": True
         },
         "models": model_manager.get_current_config(),
         "endpoints": {
@@ -658,7 +844,15 @@ async def get_server_info():
             "direct_messages": "/threads/{thread_id}/messages_direct",
             "update_model": "/models/update",
             "upload_knowledge": "/knowledge/upload",
-            "add_url": "/knowledge/url"
+            "add_url": "/knowledge/url",
+            "profile": "/profile/{user_id}",
+            "drive_files": "/knowledge/drive/list",
+            "developer_guide": "/developer"
+        },
+        "documentation": {
+            "swagger": "/docs",
+            "redoc": "/redoc",
+            "openapi": "/openapi.json"
         }
     }
 
@@ -667,10 +861,16 @@ class ModelUpdate(BaseModel):
     model_id: str
     persist: bool = False
 
-@app.post("/models/update")
+@app.post("/models/update", tags=["Models"], summary="Update AI model configuration")
 async def update_model_endpoint(update: ModelUpdate):
     """
-    Dynamically update the model ID for a specific type.
+    Dynamically update the AI model for a specific type.
+    
+    - **fast**: Quick responses, used for simple queries
+    - **smart**: Deep reasoning, used for complex problems
+    - **vision**: Image analysis capabilities
+    
+    Set `persist=true` to save the change to `.env` file.
     """
     try:
         model_manager.update_model(update.type, update.model_id, update.persist)
@@ -678,8 +878,13 @@ async def update_model_endpoint(update: ModelUpdate):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-@app.get("/threads/{user_id}")
+@app.get("/threads/{user_id}", tags=["Threads"], summary="Get user's conversation threads")
 async def get_user_threads(user_id: str):
+    """
+    Retrieve all conversation threads for a user, ordered by most recent.
+    
+    Returns a list of threads with their IDs, titles, and last update times.
+    """
     pool = app.state.pool
     async with pool.connection() as conn:
         cursor = await conn.execute(
@@ -689,8 +894,13 @@ async def get_user_threads(user_id: str):
         rows = await cursor.fetchall()
         return [{"thread_id": r[0], "title": r[1], "updated_at": r[2]} for r in rows]
 
-@app.get("/threads/{thread_id}/messages")
+@app.get("/threads/{thread_id}/messages", tags=["Threads"], summary="Get messages in a thread")
 async def get_thread_messages(thread_id: str):
+    """
+    Retrieve all messages in a conversation thread.
+    
+    Returns messages in chronological order with their type (user/ai) and content.
+    """
     try:
         pool = app.state.pool
         checkpointer = AsyncPostgresSaver(pool)
@@ -815,10 +1025,17 @@ async def get_thread_messages_direct(thread_id: str):
         logger.error(f"Error getting messages: {e}")
         return []
 
-@app.post("/knowledge/upload")
+@app.post("/knowledge/upload", tags=["Knowledge"], summary="Upload a document to knowledge base")
 async def upload_knowledge(file: UploadFile = File(...)):
     """
-    Upload a file (PDF or Text) to the knowledge base.
+    Upload a PDF or text file to the knowledge base.
+    
+    The content is automatically:
+    - Extracted (text from PDF or plain text)
+    - Chunked for efficient retrieval
+    - Indexed for semantic search
+    
+    Supported formats: `.pdf`, `.txt`, `.md`
     """
     try:
         content = ""
@@ -849,13 +1066,16 @@ async def upload_knowledge(file: UploadFile = File(...)):
 class UrlRequest(BaseModel):
     url: str
 
-@app.post("/knowledge/url")
+@app.post("/knowledge/url", tags=["Knowledge"], summary="Ingest content from URL")
 async def add_knowledge_url_endpoint(request: UrlRequest):
-    # ... existing implementation ...
-    # (I need to replicate existing implementation here or use replacement carefully)
-    # Since I am "Replacing" a block, I should check what I am targeting.
+    """
+    Scrape and ingest content from a web URL into the knowledge base.
     
-    # Actually, simplest is to append new endpoints AFTER existing ones using last few lines.
+    The URL content is:
+    - Fetched and HTML tags stripped
+    - Cleaned and chunked
+    - Indexed for semantic search
+    """
 
     try:
         import requests as req
@@ -888,8 +1108,15 @@ async def add_knowledge_url_endpoint(request: UrlRequest):
 
 # --- GOOGLE DRIVE ENDPOINTS ---
 
-@app.get("/knowledge/drive/list")
+@app.get("/knowledge/drive/list", tags=["Knowledge"], summary="List Google Drive files")
 async def list_drive_files(q: Optional[str] = None):
+    """
+    List files from connected Google Drive.
+    
+    Requires `drive_credentials.json` or `service_account.json` in the server root.
+    
+    - **q**: Optional search query to filter files by name
+    """
     try:
         from google_drive_connector import drive_connector
         files = drive_connector.list_files(query=q)
@@ -903,8 +1130,14 @@ class DriveIngestRequest(BaseModel):
     file_id: str
     file_name: str
 
-@app.post("/knowledge/drive/ingest")
+@app.post("/knowledge/drive/ingest", tags=["Knowledge"], summary="Ingest file from Google Drive")
 async def ingest_drive_file(request: DriveIngestRequest):
+    """
+    Download and ingest a file from Google Drive into the knowledge base.
+    
+    Supports large files with streaming download.
+    Automatically processes PDFs and text files.
+    """
     try:
         from google_drive_connector import drive_connector
         
@@ -927,9 +1160,17 @@ async def ingest_drive_file(request: DriveIngestRequest):
 
 # --- LEARNING PROFILE ENDPOINTS ---
 
-@app.get("/profile/{user_id}")
+@app.get("/profile/{user_id}", tags=["Profile"], summary="Get user's learning profile")
 async def get_user_profile(user_id: str):
-    """Get learning profile for a user."""
+    """
+    Get the complete learning profile for a user.
+    
+    Returns:
+    - Topics studied with accuracy statistics
+    - Identified strengths and weaknesses
+    - Learning preferences (style, difficulty, language)
+    - Session statistics
+    """
     try:
         from learning_profile import get_learning_profile
         profile = get_learning_profile(user_id)
@@ -941,9 +1182,16 @@ class ProfileUpdate(BaseModel):
     key: str
     value: str
 
-@app.post("/profile/{user_id}/preference")
+@app.post("/profile/{user_id}/preference", tags=["Profile"], summary="Update user preference")
 async def update_user_preference(user_id: str, update: ProfileUpdate):
-    """Update a user's learning preference."""
+    """
+    Update a user's learning preference.
+    
+    Available preferences:
+    - **preferred_style**: 'balanced', 'visual', 'textual', 'interactive'
+    - **difficulty_level**: 'easy', 'medium', 'hard'
+    - **preferred_language**: 'auto', 'en' (English), 'sw' (Kiswahili)
+    """
     try:
         from learning_profile import get_learning_profile
         profile = get_learning_profile(user_id)
@@ -956,9 +1204,16 @@ class TopicRecord(BaseModel):
     topic: str
     was_correct: bool = True
 
-@app.post("/profile/{user_id}/record")
+@app.post("/profile/{user_id}/record", tags=["Profile"], summary="Record learning interaction")
 async def record_topic_interaction(user_id: str, record: TopicRecord):
-    """Record a learning interaction for analytics."""
+    """
+    Record a learning interaction for a specific topic.
+    
+    This data is used to:
+    - Track topic mastery over time
+    - Identify strengths and weaknesses
+    - Personalize future tutoring responses
+    """
     try:
         from learning_profile import get_learning_profile
         profile = get_learning_profile(user_id)
@@ -993,8 +1248,17 @@ if __name__ == "__main__":
 
 
 # --- Health and Readiness Probes ---
-@app.get("/health")
+@app.get("/health", tags=["System"], summary="Health check")
 async def health():
+    """
+    Basic health check endpoint.
+    
+    Returns configuration status for:
+    - LangSmith tracing
+    - Database connection
+    - Groq API
+    - TTS feature
+    """
     return {
         "status": "ok",
         "langsmith_tracing": bool(os.getenv("LANGCHAIN_API_KEY")),
@@ -1003,8 +1267,14 @@ async def health():
         "enable_tts": os.getenv("ENABLE_TTS", "0") == "1",
     }
 
-@app.get("/ready")
+@app.get("/ready", tags=["System"], summary="Readiness probe")
 async def ready():
+    """
+    Kubernetes-style readiness probe.
+    
+    Checks database connectivity to determine if the server
+    is ready to accept traffic.
+    """
     # Check DB connectivity
     pool = getattr(app.state, "pool", None)
     db_ok = False
