@@ -154,6 +154,14 @@ class EpisodicMemory:
         except Exception:
             return []
 
+    def delete_thread(self, user_id: str) -> bool:
+        """Delete all memories associated with a specific user/thread."""
+        try:
+            self.collection.delete(where={"user_id": user_id})
+            return True
+        except Exception:
+            return False
+
 class KnowledgeBase:
     """Lightweight retrieval-augmented knowledge base using ChromaDB."""
     def __init__(self, persist_directory: str = "./chroma_db"):

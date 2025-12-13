@@ -137,7 +137,7 @@ def _make_cache_key(message_text: str, image_data: Optional[str]) -> str:
 # --- Configuration ---
 DB_URI = os.getenv("DB_URI")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-ENABLE_TTS = os.getenv("ENABLE_TTS", "1")  # Set to "1" to enable TTS if supported
+ENABLE_TTS = os.getenv("ENABLE_TTS", "0")  # Set to "1" to enable TTS if supported
 GRAPH_RECURSION_LIMIT = int(os.getenv("GRAPH_RECURSION_LIMIT", "100"))
 # Response Cache configuration (in-memory LRU)
 CACHE_ENABLED = os.getenv("CACHE_ENABLED", "1") == "1"
@@ -502,6 +502,114 @@ async def chat_endpoint(request: ChatRequest):
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+class RegenerateRequest(BaseModel):
+    model_preference: str = Field("smart", description="Model to use for regeneration")
+    user_id: str = Field("default_user", description="Unique identifier for the user")
+
+# Connection Manager for WS Broadcasting
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: dict[str, list[WebSocket]] = {}
+    async def connect(self, thread_id: str, websocket: WebSocket):
+        if thread_id not in self.active_connections:
+            self.active_connections[thread_id] = []
+        self.active_connections[thread_id].append(websocket)
+        logger.info(f"🔌 WS Connected: Thread {thread_id}")
+    def disconnect(self, thread_id: str, websocket: WebSocket):
+        if thread_id in self.active_connections and websocket in self.active_connections[thread_id]:
+            self.active_connections[thread_id].remove(websocket)
+            if not self.active_connections[thread_id]:
+                del self.active_connections[thread_id]
+        logger.info(f"🔌 WS Disconnected: Thread {thread_id}")
+    async def broadcast_to_thread(self, thread_id: str, message: dict):
+        if thread_id in self.active_connections:
+            logger.info(f"📡 Broadcasting to {len(self.active_connections[thread_id])} clients")
+            for connection in self.active_connections[thread_id]:
+                try:
+                    await connection.send_json(message)
+                except Exception as e:
+                    logger.warning(f"Failed to send: {e}")
+        else:
+            logger.warning(f"⚠️ No active WebSocket for thread {thread_id}")
+
+manager = ConnectionManager()
+
+@app.post("/threads/{thread_id}/regenerate", tags=["Chat"])
+async def regenerate_endpoint(thread_id: str, request: Optional[RegenerateRequest] = None):
+    pool = app.state.pool
+    async with pool.connection() as conn:
+        cursor = await conn.execute("""
+            SELECT content, user_id, created_at FROM thread_messages_v2
+            WHERE thread_id = %s AND message_type = 'user'
+            ORDER BY created_at DESC LIMIT 1
+        """, (thread_id,))
+        row = await cursor.fetchone()
+        if not row:
+            return {"error": "No user message found"}
+        last_user_msg, user_id, timestamp = row
+        await conn.execute("DELETE FROM thread_messages_v2 WHERE thread_id = %s AND created_at > %s", (thread_id, timestamp))
+        await conn.commit()
+    
+    async def event_generator():
+        user_profile = await get_or_create_profile(user_id)
+        model_pref = request.model_preference if request else "smart"
+        human_message = HumanMessage(content=f"{last_user_msg}\\n\\n[System: Use different teaching approach]")
+        checkpointer = AsyncPostgresSaver(pool)
+        app_graph = workflow.compile(checkpointer=checkpointer)
+        
+        logger.info(f"⚡ Regenerating with model: {model_pref}")
+        async for event in app_graph.astream_events(
+            {"messages": [human_message], "model_preference": model_pref, "user_profile": user_profile, "tool_invocations": 0},
+            config={"configurable": {"thread_id": thread_id}, "recursion_limit": GRAPH_RECURSION_LIMIT}, version="v1"
+        ):
+            if event["event"] == "on_chat_model_stream":
+                node = event.get("metadata", {}).get("langgraph_node")
+                if node not in ["planner", "reflection"]:
+                    content = event["data"]["chunk"].content
+                    if content:
+                        chunk = {'type': 'message', 'content': content}
+                        yield f"data: {json.dumps(chunk)}\\n\\n"
+                        await manager.broadcast_to_thread(thread_id, chunk)
+        yield "data: [DONE]\\n\\n"
+        await manager.broadcast_to_thread(thread_id, {"type": "end_turn"})
+    
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+@app.delete("/threads/{thread_id}", tags=["Threads"], summary="Delete a conversation thread")
+async def delete_thread_endpoint(thread_id: str):
+    # 1. Delete from PostgreSQL
+    pool = app.state.pool
+    async with pool.connection() as conn:
+        try:
+            # Check if thread exists
+            cursor = await conn.execute("SELECT user_id FROM user_threads WHERE thread_id = %s", (thread_id,))
+            row = await cursor.fetchone()
+            user_id = row[0] if row else None
+            
+            # Delete messages
+            await conn.execute("DELETE FROM thread_messages_v2 WHERE thread_id = %s", (thread_id,))
+            # Delete thread metadata
+            await conn.execute("DELETE FROM user_threads WHERE thread_id = %s", (thread_id,))
+            # Delete checkpoints
+            await conn.execute("DELETE FROM checkpoints WHERE thread_id = %s", (thread_id,))
+            await conn.execute("DELETE FROM checkpoint_blobs WHERE thread_id = %s", (thread_id,))
+            await conn.execute("DELETE FROM checkpoint_writes WHERE thread_id = %s", (thread_id,))
+            await conn.commit()
+            
+            # 2. Delete from Episodic Memory (if user_id is known)
+            if user_id:
+                # We can't delete by thread_id easily in Chroma unless configured to filter by thread_id
+                # skills_db.delete_thread deletes by user_id which is DESTRUCTIVE for other threads
+                # For now, we will skip partial deletion from vector DB or implementing a stricter filter later.
+                # If we really want to delete specific memory, we'd need to store thread_id in metadata.
+                pass
+
+            return {"status": "success", "message": f"Thread {thread_id} deleted."}
+        except Exception as e:
+            logger.error(f"Error deleting thread {thread_id}: {e}")
+            return {"status": "error", "message": str(e)}
+
+
 @app.get("/memory/{user_id}", tags=["Profile"], summary="Get user memory state")
 async def get_memory(user_id: str):
     """
@@ -640,40 +748,78 @@ async def websocket_endpoint(websocket: WebSocket):
                     await websocket.send_json({"type": "end_turn"})
                     continue
 
-            # Try Groq Compound System first (text-only), then fall back to LangGraph
-            used_system = False
-            if USE_GROQ_SYSTEM and systems_supported() and not image_data:
+
+            # --- Fast Intent Classification for Complex Reasoning Bypass ---
+            # Detect if this is a complex reasoning task (math, physics, derivations)
+            # If so, bypass LangGraph entirely and use Groq Compound directly
+            bypass_graph_for_compound = False
+            
+            if not image_data and systems_supported():  # Only for text queries when Groq Compound is available
                 try:
-                    logger.info("Using Groq Compound System...")
-                    for token in stream_compound_response(message_text, session_id=thread_id, system_id=GROQ_SYSTEM_ID):
+                    from pydantic import BaseModel, Field
+                    from typing import Literal
+                    
+                    class QuickIntent(BaseModel):
+                        intent: Literal["SIMPLE_CHAT", "COMPLEX_REASONING"] = Field(
+                            ..., 
+                            description="COMPLEX_REASONING for math, physics, chemistry, derivations, or complex problem-solving. SIMPLE_CHAT for greetings, simple facts, or clarifications."
+                        )
+                    
+                    # Use fast model for quick classification
+                    classifier = model_manager.get_model("fast").with_structured_output(QuickIntent)
+                    classification = await classifier.ainvoke([
+                        HumanMessage(content=f"Classify this query:\n{message_text}")
+                    ])
+                    
+                    if classification.intent == "COMPLEX_REASONING":
+                        bypass_graph_for_compound = True
+                        logger.info("🔀 Detected COMPLEX_REASONING - Bypassing LangGraph, using Groq Compound directly")
+                except Exception as e:
+                    logger.warning(f"Intent classification failed: {e}. Falling back to LangGraph.")
+                    bypass_graph_for_compound = False
+            
+            # If complex reasoning detected, use Groq Compound directly
+            if bypass_graph_for_compound:
+                try:
+                    logger.info("🚀 Using Groq Compound System (direct, no graph overhead)...")
+                    for token in stream_compound_response(message_text):
                         if token:
                             full_response_text += token
                             ev = {"type": "token", "content": token}
                             events_to_cache.append(ev)
                             await websocket.send_json(ev)
-                    used_system = True
+                    
+                    # Cache and end turn
+                    if CACHE_ENABLED:
+                        try:
+                            _response_cache.set(cache_key, {"events": events_to_cache, "full_text": full_response_text})
+                        except Exception:
+                            pass
+                    await websocket.send_json({"type": "end_turn"})
+                    continue  # Skip LangGraph entirely
+                    
                 except Exception as e:
-                    logger.error(f"Groq System error, falling back to LangGraph: {e}")
-                    used_system = False
+                    logger.error(f"Groq Compound direct call failed: {e}. Falling back to LangGraph.")
+                    # Fall through to LangGraph
             
-            if not used_system:
-                logger.info("Using LangGraph workflow...")
-                # Enhanced recursion handling: retries with increased limit and an optional wall-clock timeout
-                attempts = 0
-                current_limit = GRAPH_RECURSION_LIMIT
+            # Standard LangGraph flow (for simple chat, vision, or if Groq Compound failed)
+            logger.info("Using LangGraph workflow...")
+            # Enhanced recursion handling: retries with increased limit and an optional wall-clock timeout
+            attempts = 0
+            current_limit = GRAPH_RECURSION_LIMIT
 
-                async def _consume_events(limit: int):
-                    local_config = {**run_config, "recursion_limit": limit}
-                    async for event in app_graph.astream_events(
-                        {
-                            "messages": [human_message],
-                            "model_preference": model_preference,
-                            "user_profile": user_profile,
-                            "tool_invocations": 0
-                        },
-                        config=local_config,
-                        version="v1"
-                    ):
+            async def _consume_events(limit: int):
+                local_config = {**run_config, "recursion_limit": limit}
+                async for event in app_graph.astream_events(
+                    {
+                        "messages": [human_message],
+                        "model_preference": model_preference,
+                        "user_profile": user_profile,
+                        "tool_invocations": 0
+                    },
+                    config=local_config,
+                    version="v1"
+                ):
                         kind = event["event"]
                         # logger.debug(f"Event: {kind}") # Debug logging
                         

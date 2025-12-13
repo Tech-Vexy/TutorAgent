@@ -8,7 +8,7 @@ TopScore AI is an advanced, multimodal AI tutor designed specifically for the Ke
 *   **Multimodal Capabilities:**
     *   **Text:** Deep reasoning and simple chat.
     *   **Vision:** Analyzes images (homework, diagrams) using Llama 3.2 Vision.
-    *   **Voice:** Speech-to-Text (Whisper) and Text-to-Speech (PlayAI) for natural interaction.
+    *   **Voice:** Speech-to-Text (Whisper) for natural interaction.
 *   **Intelligent Routing:** Automatically routes queries to the best model (Vision, Complex Reasoning, or Simple Chat).
 *   **Model Switching:** Users can toggle between "Smart" (Llama 3.3 70B), "Fast" (Llama 3.1 8B), Mixtral, and Gemma models.
 *   **Tools:** Generates educational plots and KCSE-style quizzes.
@@ -23,7 +23,7 @@ TopScore AI is an advanced, multimodal AI tutor designed specifically for the Ke
 *   **Models:**
     *   *Reasoning:* Llama 3.3 70B Versatile, Llama 3.1 8B Instant, Mixtral 8x7B, Gemma 2 9B
     *   *Vision:* Llama 3.2 11B Vision Preview
-    *   *Audio:* Whisper Large V3 (STT), PlayAI-TTS (TTS)
+    *   *Audio:* Whisper Large V3 (STT)
 *   **Database:** PostgreSQL (via `langgraph-checkpoint-postgres`)
 *   **Frontend:** HTML/JS WebSocket Client (for testing)
 

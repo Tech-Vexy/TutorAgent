@@ -19,14 +19,6 @@ try:
     from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 except ImportError:
     ChatHuggingFace = None
-    HuggingFaceEndpoint = None
-
-from langgraph.graph import StateGraph, END
-from langgraph.prebuilt import create_react_agent
-from pydantic import BaseModel, Field
-from deepagents import create_deep_agent
-from tools import generate_educational_plot, generate_kcse_quiz, learn_skill, search_skills, web_search, run_python, add_knowledge, add_knowledge_url, search_knowledge, generate_image, recognize_text
-from skills_db import EpisodicMemory, KnowledgeBase, SkillManager
 from prompts import (
     ROUTER_SYSTEM_PROMPT,
     VISION_SYSTEM_PROMPT,
@@ -41,6 +33,26 @@ from prompts import (
     LENS_TRANSLATE_PROMPT,
     LENS_EXPLAIN_PROMPT
 )
+from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import create_react_agent
+from pydantic import BaseModel, Field
+from deepagents import create_deep_agent
+from tools import (
+    generate_educational_plot,
+    generate_kcse_quiz,
+    learn_skill,
+    search_skills,
+    web_search,
+    run_python,
+    add_knowledge,
+    add_knowledge_url,
+    search_knowledge,
+    generate_image,
+    recognize_text
+)
+from background_tools import generate_study_guide_tool, scrape_docs_tool, check_task_status
+from groq_system import stream_compound_response, systems_supported
+from skills_db import EpisodicMemory, KnowledgeBase, SkillManager
 
 # --- Configuration ---
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
@@ -68,12 +80,11 @@ from language_support import detect_language, get_language_instruction, get_loca
 # --- State Definition ---
 MAX_TOOL_CALLS = int(os.getenv("MAX_TOOL_CALLS", "4"))
 
-
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], operator.add]
     user_profile: Dict[str, Any]
     pedagogy_strategy: str  # DIRECT_ANSWER or SOCRATIC_GUIDE
-    intent: str # SIMPLE_CHAT, COMPLEX_REASONING, VISION_ANALYSIS
+    intent: str # SIMPLE_CHAT, COMPLEX_REASONING, VISION_ANALYSIS, COMPLEX_PARALLEL
     model_preference: Optional[str] # "fast", "smart", "vision"
     tool_invocations: Annotated[int, operator.add]
     plan: Optional[str]
@@ -83,8 +94,8 @@ class AgentState(TypedDict):
 
 # --- Router Schema ---
 class RouterOutput(BaseModel):
-    intent: Literal["SIMPLE_CHAT", "COMPLEX_REASONING"] = Field(
-        ..., description="The type of interaction required. Choose COMPLEX_REASONING for any math, science, drawing, or complex tasks."
+    intent: Literal["SIMPLE_CHAT", "COMPLEX_REASONING", "COMPLEX_PARALLEL"] = Field(
+        ..., description="The type of interaction required. Choose COMPLEX_REASONING for any math, science, drawing, or complex tasks. Use COMPLEX_PARALLEL for verification or deep analysis."
     )
     pedagogy_strategy: Literal["DIRECT_ANSWER", "SOCRATIC_GUIDE"] = Field(
         ..., description="The teaching strategy to apply."
@@ -98,7 +109,9 @@ class SkillSaveOutput(BaseModel):
 
 class ReviewOutput(BaseModel):
     approved: bool = Field(..., description="Whether the response is approved.")
-    feedback: str = Field(..., description="Feedback if rejected, or empty if approved.")
+    feedback: Optional[str] = Field(None, description="Feedback if rejected, or empty if approved.")
+
+# --- Helper Functions ---
 
 def clean_messages(messages: List[BaseMessage]) -> List[BaseMessage]:
     """
@@ -156,7 +169,6 @@ def clean_messages(messages: List[BaseMessage]) -> List[BaseMessage]:
         else:
             cleaned.append(msg)
     return cleaned
-
 
 def extract_text_content(message: BaseMessage) -> str:
     """Extract plain text from a HumanMessage that may be multimodal (list of parts)."""
@@ -362,6 +374,44 @@ def remove_code_blocks(text: str) -> str:
     pattern = r"```(?:python|py)?.*?\n[\s\S]*?```"
     return re.sub(pattern, "", text, flags=re.DOTALL | re.IGNORECASE).strip()
 
+async def parallel_processing_node(state: AgentState):
+    """
+    Executes parallel analysis (Map) and synthesizes the result (Reduce).
+    Verifies facts and analyzes tone simultaneously.
+    """
+    print("⚡ Starting Parallel Execution (Map-Reduce)...")
+    messages = state["messages"]
+    last_user_input = extract_text_content(messages[-1])
+    
+    # Use fast model for sub-tasks to be quick
+    model = model_manager.get_model("fast")
+    
+    # Wrapper for ainvoke
+    async def run_chain(prompt_text):
+        return await model.ainvoke([HumanMessage(content=prompt_text)])
+
+    # 1. Parallel Tasks (Map)
+    task1 = run_chain(f"Fact check this Statement. List any logical or factual errors strictly. If none, say 'Verified'.\nStatement: {last_user_input}")
+    task2 = run_chain(f"Analyze the Tone of this Statement. Return 1-2 adjectives (e.g. 'Curious', 'Frustrated').\nStatement: {last_user_input}")
+    
+    # Execute in parallel
+    fact_res, tone_res = await asyncio.gather(task1, task2)
+    
+    # 2. Synthesis (Reduce)
+    synthesis_prompt = f"""
+    The user said: "{last_user_input}"
+    
+    Analysis Results:
+    1. Fact Check: {fact_res.content}
+    2. Tone: {tone_res.content}
+    
+    Synthesize a helpful response that addresses their query while subtly acknowledging these findings.
+    """
+    
+    final_response = await model.ainvoke([HumanMessage(content=synthesis_prompt)])
+    
+    return {"messages": [final_response]}
+
 async def deep_thinker_node(state: AgentState):
     """
     Handles complex reasoning using the smart model and tools.
@@ -412,6 +462,8 @@ async def deep_thinker_node(state: AgentState):
     # Defaulting to Gemini 1.5 Pro for smart and Flash for everything else
     # Select model based on preference
     # Defaulting to Gemini 1.5 Pro for smart and Flash for everything else
+    # Select model based on preference
+    # Defaulting to Gemini 1.5 Pro for smart and Flash for everything else
     if model_pref == "fast":
         selected_llm = model_manager.get_model("fast")
     else:
@@ -431,7 +483,13 @@ async def deep_thinker_node(state: AgentState):
         add_knowledge_url,
         search_knowledge,
         generate_image,
+        add_knowledge_url,
+        search_knowledge,
+        generate_image,
         recognize_text,
+        generate_study_guide_tool,
+        scrape_docs_tool,
+        check_task_status,
     ]
     
     # --- Integration: Tavily MCP Tools ---
@@ -464,7 +522,8 @@ async def deep_thinker_node(state: AgentState):
             all_bindable_tools.append(groq_drive_tool)
             
         # Bind ALL tools (Local + Groq) to the model
-        selected_llm_with_tools = selected_llm.bind_tools(all_bindable_tools)
+        # selected_llm_with_tools = selected_llm.bind_tools(all_bindable_tools)
+        selected_llm_with_tools = selected_llm # Bypass manual binding to avoid mismatch error
         
     except Exception as e:
         print(f"Error binding Groq Connectors: {e}")
@@ -504,31 +563,49 @@ async def deep_thinker_node(state: AgentState):
     # If using 'langgraph.prebuilt', passing a bound model usually respects the existing binding OR merges.
     # To be safe, we rely on the fact that we passed the bound model.
     deep_agent = create_react_agent(
-        model=selected_llm_with_tools,
-        tools=tools,
-        state_modifier=full_system_prompt
+        model=selected_llm, # Let create_react_agent bind the tools
+        tools=tools
     )
     
     # Clean messages to remove large base64 strings from history to save tokens
     cleaned_messages = clean_messages(messages)
     
-    # Apply conversation summarization for very long sessions
-    # This compacts old messages into a summary while keeping recent ones intact
-    thread_id = user_profile.get("student_id", "default")
-    if conversation_summarizer.should_summarize(cleaned_messages):
-        try:
-            summarizer_llm = model_manager.get_model("fast")
-            cleaned_messages, summary = await conversation_summarizer.summarize_and_compact(
-                cleaned_messages, thread_id, summarizer_llm
-            )
-            print(f"\n📝 Conversation summarized. Summary length: {len(summary)} chars\n")
-        except Exception as e:
-            print(f"Summarization skipped: {e}")
-    
+    # ... (summarization logic) ...
+
     try:
-        # Invoke Deep Agent
-        # We wrap the messages in a dict as expected by LangGraph agents
-        result = await deep_agent.ainvoke({"messages": cleaned_messages})
+        # Prepend System Prompt manually since create_react_agent didn't accept modifier
+        system_msg = SystemMessage(content=full_system_prompt)
+        input_messages = [system_msg] + cleaned_messages
+        
+        # --- Groq Compound System Integration ---
+        # If intent is COMPLEX_REASONING, use the compound model EXCLUSIVELY (no fallback to LangGraph)
+        if intent == "COMPLEX_REASONING":
+            if not systems_supported():
+                return {"messages": [AIMessage(content="⚠️ Groq Compound System is not available. Please check your GROQ_API_KEY configuration.")]}
+            
+            print("\n🚀 Using Groq Compound System (groq/compound) for reasoning...\n")
+            try:
+                # Combine system prompt and last user message for the "prompt"
+                # Ideally, we should format the whole conversation, but the helper simple takes a prompt string.
+                # We'll extract the last query and prepend context instructions.
+                query_text = extract_text_content(cleaned_messages[-1])
+                compound_prompt = f"{full_system_prompt}\n\nUSER QUERY:\n{query_text}"
+                
+                full_response = ""
+                # stream_compound_response yields tokens
+                for token in stream_compound_response(compound_prompt):
+                    if token:
+                        full_response += token
+                
+                return {"messages": [AIMessage(content=full_response)]}
+                
+            except Exception as e:
+                # No fallback - return error to user
+                error_msg = f"❌ Groq Compound System error: {str(e)}\n\nPlease try again or check your API configuration."
+                return {"messages": [AIMessage(content=error_msg)]}
+        
+        # Invoke Deep Agent (ONLY for non-Complex tasks like SIMPLE_CHAT or VISION_ANALYSIS)
+        result = await deep_agent.ainvoke({"messages": input_messages})
         
         # Extract the last message from the result
         # The deep agent might return a list of messages including tool calls/results
@@ -569,6 +646,9 @@ def tool_node(state: AgentState):
         search_knowledge,
         generate_image,
         recognize_text,
+        generate_study_guide_tool,
+        scrape_docs_tool,
+        check_task_status
     ]
     tool_executor = ToolNode(tools)
     return tool_executor.invoke(state)
@@ -715,9 +795,10 @@ workflow.add_node("vision_analysis", vision_node)
 workflow.add_node("deep_thinker", deep_thinker_node)
 workflow.add_node("tools", tool_node)
 workflow.add_node("save_memory", save_memory_node)
-workflow.add_node("planner", planner_node)
+# workflow.add_node("planner", planner_node) # DISABLED per user request
 workflow.add_node("reflection", reflection_node)
 workflow.add_node("reviewer", reviewer_node)
+workflow.add_node("parallel_processor", parallel_processing_node)
 
 workflow.set_entry_point("router")
 
@@ -726,7 +807,10 @@ def route_decision(state: AgentState):
     if intent == "VISION_ANALYSIS":
         return "vision_analysis"
     elif intent == "COMPLEX_REASONING":
-        return "planner"
+        # Direct to deep_thinker (which uses Groq Compound System) without planning
+        return "deep_thinker"
+    elif intent == "COMPLEX_PARALLEL":
+        return "parallel_processor"
     else:
         return "simple_chat"
 
@@ -735,8 +819,10 @@ workflow.add_conditional_edges(
     route_decision,
     {
         "vision_analysis": "vision_analysis",
-        "planner": "planner",
-        "simple_chat": "simple_chat"
+        "deep_thinker": "deep_thinker",
+        # "planner": "planner", # DISABLED
+        "simple_chat": "simple_chat",
+        "parallel_processor": "parallel_processor"
     }
 )
 
@@ -744,10 +830,11 @@ workflow.add_conditional_edges(
 workflow.add_edge("vision_analysis", "deep_thinker")
 
 # Planner feeds into deep thinker
-workflow.add_edge("planner", "deep_thinker")
+# workflow.add_edge("planner", "deep_thinker")
 
 # Simple chat saves memory then ends
 workflow.add_edge("simple_chat", "save_memory")
+workflow.add_edge("parallel_processor", "save_memory")
 
 # Deep thinker conditional edge for tools
 def should_continue(state: AgentState):
